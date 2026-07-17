@@ -1,0 +1,26 @@
+storage:
+  root: data
+  provider_naive_timezone: Europe/Istanbul
+
+provider:
+  initial_bars: 5000
+  refresh_overlap_bars: 10
+
+assets:
+  - NQ1!:CME_MINI
+  - BTCUSD:BITSTAMP
+  - BRN1!:ICEEUR
+  - GC1!:COMEX
+  - USDRUB.P:RUS
+
+indicators:
+  sma: [20, 50, 200]
+  ema: [9, 20, 50, 200]
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bollinger_period: 20
+  bollinger_stddev: 2.0
+  atr_period: 14
+  volume_sma_period: 20
