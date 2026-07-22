@@ -85,7 +85,7 @@ class AssetAnalysisService:
                 )
                 if include_short_term:
                     result["short_term"] = short_term_metrics(
-                        closed, int(short_term_sessions), normalized_asset,
+                        closed, int(short_term_sessions),
                         row_atr=calculated.iloc[-1].get("ATR")
                     )
                 return result
@@ -165,7 +165,7 @@ class AssetAnalysisService:
             }
             if include_short_term:
                 result["short_term"] = short_term_metrics(
-                    closed, int(short_term_sessions), normalized_asset, row_atr=row.get("ATR")
+                    closed, int(short_term_sessions), row_atr=row.get("ATR")
                 )
             return result
         except ValueError as exc:
@@ -229,11 +229,10 @@ def percent_change(open_price, close_price) -> float:
 def short_term_metrics(
     frame: pd.DataFrame,
     requested_sessions: int,
-    asset: str,
     row_atr,
     sharp_move_bars: int = 6,
 ) -> dict:
-    window = select_sessions(frame, requested_sessions, asset)
+    window = select_sessions(frame, requested_sessions)
     closes = window["close"]
     atr = float(row_atr) if valid(row_atr) and float(row_atr) != 0 else None
     path_length = float(closes.diff().abs().sum()) if len(closes) >= 2 else 0.0
@@ -247,7 +246,7 @@ def short_term_metrics(
         if not changes.empty:
             sharp_move = float(changes.loc[changes.abs().idxmax()])
     return {
-        "sessions_covered": sessions_covered(window, asset),
+        "sessions_covered": sessions_covered(window),
         "bars_used": len(window),
         "efficiency_ratio": number(efficiency),
         "span_atr": number(

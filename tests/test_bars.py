@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from tv_history.bars import AssetBarsService
+from tv_history.analysis import short_term_metrics
 from tv_history.mcp_response import mcp_result
 
 from test_analysis import FakeSynchronizer, settings
@@ -18,6 +19,9 @@ def session_frame() -> pd.DataFrame:
                 freq="1h",
             )
         )
+    timestamps.extend(
+        [pd.Timestamp("2026-03-22T22:00:00Z"), pd.Timestamp("2026-03-22T23:00:00Z")]
+    )
     timestamps.append(pd.Timestamp("2026-03-23T00:00:00Z"))
     index = pd.DatetimeIndex(timestamps, name="timestamp_utc")
     closes = pd.Series(
@@ -46,10 +50,10 @@ def test_asset_bars_sessions_are_completed_oldest_first(tmp_path) -> None:
     )
 
     assert result["sessions_covered"] == 4
-    assert result["bars_returned"] == 48
-    assert result["effective_bar_close"] == "2026-03-20T13:00:00+00:00"
-    assert [bar["t"][:10] for bar in result["bars"]][0] == "2026-03-17"
-    assert [bar["t"][:10] for bar in result["bars"]][-1] == "2026-03-20"
+    assert result["bars_returned"] == 38
+    assert result["effective_bar_close"] == "2026-03-23T00:00:00+00:00"
+    assert [bar["t"][:10] for bar in result["bars"]][0] == "2026-03-18"
+    assert [bar["t"][:10] for bar in result["bars"]][-1] == "2026-03-22"
     assert [bar["t"] for bar in result["bars"]] == sorted(
         bar["t"] for bar in result["bars"]
     )
@@ -64,7 +68,7 @@ def test_asset_bars_count_returns_exact_completed_tail(tmp_path) -> None:
     )
 
     assert result["bars_returned"] == 48
-    assert result["bars"][-1]["t"] == "2026-03-20T12:00:00Z"
+    assert result["bars"][-1]["t"] == "2026-03-22T23:00:00Z"
     assert all(pd.Timestamp(bar["t"]) + pd.Timedelta(hours=1) <= pd.Timestamp("2026-03-23T00:00:00Z")
                for bar in result["bars"])
 
@@ -79,10 +83,31 @@ def test_asset_bars_sessions_override_count_and_short_history_is_not_error(tmp_p
         "ICEEUR:BRN1!", "1h", "2026-03-18T02:00:00Z", count=1000
     )
 
-    assert sessions_result["bars_returned"] == 24
+    assert sessions_result["bars_returned"] == 14
     assert sessions_result["sessions_covered"] == 2
     assert "error" not in short_result
     assert short_result["bars_returned"] < 1000
+
+
+def test_count_path_reports_sunday_reopen_as_a_second_session(tmp_path) -> None:
+    service = AssetBarsService(settings(tmp_path), FakeSynchronizer(session_frame()))
+
+    result = service.get_bars(
+        "ICEEUR:BRN1!", "1h", "2026-03-23T00:00:00Z", count=8
+    )
+
+    assert result["bars_returned"] == 8
+    assert result["sessions_covered"] == 2
+    assert result["bars"][-1]["t"] == "2026-03-22T23:00:00Z"
+
+
+def test_short_term_window_includes_sunday_reopen() -> None:
+    completed = session_frame().iloc[:-1]
+
+    result = short_term_metrics(completed, 4, row_atr=2.0)
+
+    assert result["sessions_covered"] == 4
+    assert result["bars_used"] == 38
 
 
 def test_mcp_error_result_sets_protocol_error_without_an_image() -> None:

@@ -60,7 +60,7 @@ class AssetChartService:
             )
             completed = completed_as_of(source, timeframe, requested_at)
             if requested_sessions is not None:
-                bars = select_sessions(completed, requested_sessions, normalized_asset)
+                bars = select_sessions(completed, requested_sessions)
             else:
                 window_start = requested_at - pd.Timedelta(days=requested_days)
                 close_times = completed.index + duration
@@ -91,7 +91,7 @@ class AssetChartService:
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (bars.index.max() + duration).isoformat(),
                 **bar_status(timeframe, bars.index.max(), requested_at),
-                "sessions_covered": sessions_covered(bars, normalized_asset),
+                "sessions_covered": sessions_covered(bars),
                 "coverage_from": bars.index.min().isoformat(),
                 "coverage_to": (bars.index.max() + duration).isoformat(),
             }

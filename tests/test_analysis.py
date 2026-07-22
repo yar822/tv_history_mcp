@@ -237,7 +237,7 @@ def test_short_term_efficiency_is_null_for_flat_path() -> None:
         index=index,
     )
 
-    result = short_term_metrics(frame, 1, "BITSTAMP:BTCUSD", row_atr=2.0)
+    result = short_term_metrics(frame, 1, row_atr=2.0)
 
     assert result["efficiency_ratio"] is None
 

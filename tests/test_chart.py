@@ -93,10 +93,11 @@ def test_chart_sessions_walk_back_across_weekend_and_report_coverage(tmp_path) -
 
     assert isinstance(calendar, ChartResult)
     assert isinstance(sessions, ChartResult)
-    assert calendar.metadata["sessions_covered"] == 2
+    assert calendar.metadata["sessions_covered"] == 3
     assert calendar.metadata["requested_days"] == 4
     assert sessions.metadata["sessions_covered"] == 4
     assert sessions.metadata["requested_sessions"] == 4
+    assert sessions.metadata["effective_bar_close"] == "2026-03-23T00:00:00+00:00"
 
 
 def test_chart_no_bars_returns_structured_error_for_both_versions(tmp_path) -> None:

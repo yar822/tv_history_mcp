@@ -44,7 +44,7 @@ class AssetBarsService:
             )
             completed = completed_as_of(source, timeframe, requested_at)
             bars = (
-                select_sessions(completed, parsed_sessions, normalized_asset)
+                select_sessions(completed, parsed_sessions)
                 if parsed_sessions is not None
                 else completed.tail(parsed_count)
             )
@@ -67,7 +67,7 @@ class AssetBarsService:
                     (bars.index[-1] + duration).isoformat() if not bars.empty else None
                 ),
                 "bars": [serialize_bar(index, row) for index, row in bars.iterrows()],
-                "sessions_covered": sessions_covered(bars, normalized_asset),
+                "sessions_covered": sessions_covered(bars),
                 "bars_returned": len(bars),
                 "atr_14": finite_number(atr),
                 "data_quality": {
