@@ -40,7 +40,7 @@ codex mcp add tv-history -- C:\_tools\202607_tradingview_mcp\tv_history\.venv\Sc
 
 ```text
 asset_analysis(
-  asset="BTCUSD:BITSTAMP",
+  asset="BITSTAMP:BTCUSD",
   timeframe="1h",
   timestamp="2026-07-01T12:00:00Z"
 )
@@ -51,16 +51,30 @@ the compact, completed-bar-only trading response explicitly:
 
 ```text
 asset_analysis(
-  asset="BTCUSD:BITSTAMP",
+  asset="BITSTAMP:BTCUSD",
   timeframe="4h",
   timestamp="2026-07-01T12:00:00Z",
-  response_version="execution"
+  response_version="execution",
+  include_short_term=true,
+  short_term_sessions=4
 )
 ```
 
 ```text
+asset_bars(
+  asset="ICEEUR:BRN1!",
+  timeframe="1h",
+  timestamp="2026-03-23T00:00:00Z",
+  sessions=4
+)
+```
+
+`asset_bars` returns completed OHLCV bars oldest-first. Use `count` (1–1000)
+or `sessions`; when both are supplied, `sessions` wins.
+
+```text
 asset_chart(
-  asset="BTCUSD:BITSTAMP",
+  asset="BITSTAMP:BTCUSD",
   timeframe="4h",
   timestamp="2026-07-01T12:00:00Z",
   days="10"
@@ -69,6 +83,9 @@ asset_chart(
 
 `asset_chart` returns a PNG candlestick chart with red/green bodies, wicks, and
 volume, plus a compact metadata block describing the asset and chart range.
+Use `sessions` instead of `days` to request a fixed number of trading dates;
+`sessions` wins when both are supplied. All tool errors use the same structured
+error object and are marked as MCP errors.
 
 Supported timeframes are `1h`, `4h`, `1D`, and `1W`. Each timeframe is fetched
 directly from tvDatafeed and stored independently as `1h.csv`, `4h.csv`,

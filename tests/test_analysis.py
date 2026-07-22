@@ -6,6 +6,7 @@ from tv_history.analysis import (
     AssetAnalysisService,
     candle_analysis,
     daily_atr_bands,
+    short_term_metrics,
     support_resistance,
 )
 from tv_history.config import Settings
@@ -99,7 +100,7 @@ def test_invalid_timeframe_does_not_synchronize(tmp_path) -> None:
 
     result = service.analyze("BTCUSD:BITSTAMP", "15m", None)
 
-    assert result["error"] == "invalid_parameter"
+    assert result["error"]["code"] == "UNSUPPORTED_TIMEFRAME"
     assert sync.calls == 0
 
 
@@ -133,7 +134,7 @@ def test_unsafe_asset_is_rejected_before_synchronization(tmp_path) -> None:
 
     result = service.analyze("BTCUSD:..\\escape", "1h", None)
 
-    assert result["error"] == "invalid_parameter"
+    assert result["error"]["code"] == "INVALID_PARAMETER"
     assert sync.calls == 0
 
 
@@ -203,3 +204,56 @@ def test_small_candle_is_neutral_by_timeframe() -> None:
     row["high"] = 103.0
     row["close"] = 102.1
     assert candle_analysis(row, "1D")["type"] == "Bullish"
+
+
+def test_short_term_block_is_optional_and_uses_requested_sessions(tmp_path) -> None:
+    configured = settings(tmp_path)
+    service = AssetAnalysisService(configured, FakeSynchronizer(hourly_frame()))
+
+    without = service.analyze(
+        "BITSTAMP:BTCUSD", "1h", "2026-02-11T00:00:00Z"
+    )
+    with_block = service.analyze(
+        "BITSTAMP:BTCUSD",
+        "1h",
+        "2026-02-11T00:00:00Z",
+        include_short_term=True,
+        short_term_sessions=4,
+    )
+
+    assert "short_term" not in without
+    assert with_block["short_term"]["sessions_covered"] == 4
+    assert with_block["short_term"]["bars_used"] == 96
+    assert set(with_block["short_term"]) == {
+        "sessions_covered", "bars_used", "efficiency_ratio", "span_atr",
+        "net_atr", "sharp_move_atr", "sharp_move_bars",
+    }
+
+
+def test_short_term_efficiency_is_null_for_flat_path() -> None:
+    index = pd.date_range("2026-01-01", periods=20, freq="1h", tz="UTC")
+    frame = pd.DataFrame(
+        {"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "volume": 1.0},
+        index=index,
+    )
+
+    result = short_term_metrics(frame, 1, "BITSTAMP:BTCUSD", row_atr=2.0)
+
+    assert result["efficiency_ratio"] is None
+
+
+def test_analysis_error_shape_is_identical_and_dst_error_is_not_retryable(tmp_path) -> None:
+    class AmbiguousSynchronizer:
+        def ensure_available(self, asset: str, timeframe: str, requested_at: pd.Timestamp):
+            raise ValueError("2013-10-27 03:00:00 is an ambiguous time and cannot be inferred")
+
+    service = AssetAnalysisService(settings(tmp_path), AmbiguousSynchronizer())
+
+    legacy = service.analyze("BITSTAMP:BTCUSD", "4h", "2026-01-12T04:00:00Z")
+    execution = service.analyze(
+        "BITSTAMP:BTCUSD", "4h", "2026-01-12T04:00:00Z", "execution"
+    )
+
+    assert legacy == execution
+    assert legacy["error"]["code"] == "DATA_PROVIDER_ERROR"
+    assert legacy["error"]["retryable"] is False

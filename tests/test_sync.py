@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -198,6 +200,24 @@ def test_provider_sends_exchange_symbol_input_in_tvdatafeed_argument_order(tmp_p
     assert provider._client.arguments["symbol"] == "MX1!"
     assert provider._client.arguments["exchange"] == "RUS"
     assert provider._client.arguments["n_bars"] == 25
+
+
+def test_provider_localizes_single_dst_fold_hour_without_inference_error(tmp_path) -> None:
+    class FoldHourClient:
+        def get_hist(self, **kwargs):
+            index = pd.DatetimeIndex(["2013-10-27 03:00:00"])
+            return pd.DataFrame(
+                {"open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5], "volume": [1.0]},
+                index=index,
+            )
+
+    configured = replace(make_settings(tmp_path), provider_naive_timezone="Europe/Istanbul")
+    provider = TvDatafeedProvider(configured)
+    provider._client = FoldHourClient()
+
+    result = provider.get_history("BITSTAMP:BTCUSD", "1D", 5000)
+
+    assert result.index[0] == pd.Timestamp("2013-10-27T01:00:00Z")
 
 
 def test_each_timeframe_is_downloaded_cached_and_stored_separately(tmp_path) -> None:

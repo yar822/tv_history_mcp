@@ -5,9 +5,11 @@ import math
 import pandas as pd
 
 from .config import Settings
+from .errors import error_response, is_transient_error
 from .provider import normalize_asset
 from .resample import bar_status, completed_as_of
 from .sync import HistorySynchronizer
+from .windows import select_sessions, sessions_covered
 
 
 class AssetAnalysisService:
@@ -22,6 +24,8 @@ class AssetAnalysisService:
         timestamp: str | None,
         response_version: str = "legacy",
         include_indicators: bool = False,
+        include_short_term: bool = False,
+        short_term_sessions: int = 4,
     ) -> dict:
         try:
             normalized_asset = normalize_asset(asset)
@@ -29,6 +33,8 @@ class AssetAnalysisService:
             timeframe_duration(timeframe)
             if response_version not in {"legacy", "execution"}:
                 raise ValueError("response_version must be legacy or execution")
+            if isinstance(short_term_sessions, bool) or int(short_term_sessions) < 1:
+                raise ValueError("short_term_sessions must be a positive integer")
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at
             )
@@ -40,13 +46,11 @@ class AssetAnalysisService:
                         "No completed bars are available at or before the requested timestamp.",
                         bars_available=0,
                     )
-                return {
-                    "error": "timestamp_not_covered",
-                    "asset": normalized_asset,
-                    "timeframe": timeframe,
-                    "requested_at": requested_at.isoformat(),
-                    "available_from": source.index.min().isoformat() if not source.empty else None,
-                }
+                return error_response(
+                    "INSUFFICIENT_DATA",
+                    "No completed bars are available at or before the requested timestamp.",
+                    bars_available=0,
+                )
 
             if response_version == "execution":
                 minimum_bars = 80 if timeframe == "1D" else 50
@@ -69,7 +73,7 @@ class AssetAnalysisService:
             if response_version == "execution":
                 from .execution import build_execution_response
 
-                return build_execution_response(
+                result = build_execution_response(
                     normalized_asset,
                     timeframe,
                     requested_at,
@@ -79,6 +83,12 @@ class AssetAnalysisService:
                     self.settings.indicators,
                     include_indicators,
                 )
+                if include_short_term:
+                    result["short_term"] = short_term_metrics(
+                        closed, int(short_term_sessions), normalized_asset,
+                        row_atr=calculated.iloc[-1].get("ATR")
+                    )
+                return result
             row = calculated.iloc[-1]
             previous_row = calculated.iloc[-2] if len(calculated) >= 2 else None
             price_change = percent_change(row["open"], row["close"])
@@ -101,7 +111,7 @@ class AssetAnalysisService:
                 f"{int(self.settings.indicators['macd_slow'])}"
             )
 
-            return {
+            result = {
                 "asset": normalized_asset,
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
@@ -153,22 +163,27 @@ class AssetAnalysisService:
                     source, timeframe, requested_at, float(row["close"])
                 ),
             }
+            if include_short_term:
+                result["short_term"] = short_term_metrics(
+                    closed, int(short_term_sessions), normalized_asset, row_atr=row.get("ATR")
+                )
+            return result
         except ValueError as exc:
-            if response_version == "execution":
-                message = str(exc)
-                if "timeframe must be" in message:
-                    return execution_error("UNSUPPORTED_TIMEFRAME", message)
-                if message.startswith("asset "):
-                    return execution_error("ASSET_NOT_FOUND", message)
-                return execution_error("DATA_PROVIDER_ERROR", message, retryable=True)
-            return {"error": "invalid_parameter", "message": str(exc)}
+            message = str(exc)
+            if "timeframe must be" in message:
+                return error_response("UNSUPPORTED_TIMEFRAME", message)
+            if message.startswith("asset "):
+                return error_response("INVALID_PARAMETER", message)
+            if "ambiguous time" in message:
+                return error_response("DATA_PROVIDER_ERROR", message, retryable=False)
+            return error_response("INVALID_PARAMETER", message)
         except Exception as exc:
-            if response_version == "execution":
-                message = str(exc)
-                if "returned no data" in message:
-                    return execution_error("ASSET_NOT_FOUND", message)
-                return execution_error("DATA_PROVIDER_ERROR", message, retryable=True)
-            return {"error": "analysis_failed", "message": str(exc), "asset": normalized_asset}
+            message = str(exc)
+            if "returned no data" in message:
+                return error_response("ASSET_NOT_FOUND", message)
+            return error_response(
+                "DATA_PROVIDER_ERROR", message, retryable=is_transient_error(exc)
+            )
 
 
 def execution_error(
@@ -177,10 +192,8 @@ def execution_error(
     retryable: bool = False,
     bars_available: int | None = None,
 ) -> dict:
-    error = {"code": code, "message": message, "retryable": retryable}
-    if bars_available is not None:
-        error["bars_available"] = bars_available
-    return {"error": error}
+    details = {"bars_available": bars_available} if bars_available is not None else {}
+    return error_response(code, message, retryable=retryable, **details)
 
 
 def parse_timestamp(value: str | None) -> pd.Timestamp:
@@ -211,6 +224,43 @@ def safe_ratio(numerator, denominator) -> float | None:
 
 def percent_change(open_price, close_price) -> float:
     return float((close_price - open_price) / open_price * 100) if open_price else 0.0
+
+
+def short_term_metrics(
+    frame: pd.DataFrame,
+    requested_sessions: int,
+    asset: str,
+    row_atr,
+    sharp_move_bars: int = 6,
+) -> dict:
+    window = select_sessions(frame, requested_sessions, asset)
+    closes = window["close"]
+    atr = float(row_atr) if valid(row_atr) and float(row_atr) != 0 else None
+    path_length = float(closes.diff().abs().sum()) if len(closes) >= 2 else 0.0
+    efficiency = (
+        abs(float(closes.iloc[-1] - closes.iloc[0])) / path_length
+        if path_length > 0 else None
+    )
+    sharp_move = None
+    if len(closes) > sharp_move_bars:
+        changes = closes.diff(sharp_move_bars).dropna()
+        if not changes.empty:
+            sharp_move = float(changes.loc[changes.abs().idxmax()])
+    return {
+        "sessions_covered": sessions_covered(window, asset),
+        "bars_used": len(window),
+        "efficiency_ratio": number(efficiency),
+        "span_atr": number(
+            (float(window["high"].max()) - float(window["low"].min())) / atr
+            if atr is not None and not window.empty else None
+        ),
+        "net_atr": number(
+            float(closes.iloc[-1] - closes.iloc[0]) / atr
+            if atr is not None and not closes.empty else None
+        ),
+        "sharp_move_atr": number(sharp_move / atr if atr is not None and sharp_move is not None else None),
+        "sharp_move_bars": sharp_move_bars,
+    }
 
 
 def values(row, prefix: str, periods: list[int]) -> dict:

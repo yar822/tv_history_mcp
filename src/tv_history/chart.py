@@ -6,11 +6,14 @@ from io import BytesIO
 import pandas as pd
 
 from .analysis import parse_timestamp, timeframe_duration
+from .bars import parse_positive_integer
 from .config import Settings
+from .errors import error_response, is_transient_error
 from .provider import normalize_asset
 from .resample import bar_status, completed_as_of
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
+from .windows import select_sessions, sessions_covered
 
 
 MAX_DAYS = 365
@@ -36,42 +39,51 @@ class AssetChartService:
         timestamp: str | None,
         days: int | str,
         response_version: str = "legacy",
+        sessions: int | None = None,
     ) -> ChartResult | dict:
         try:
             normalized_asset = normalize_asset(asset)
             requested_at = parse_timestamp(timestamp)
             duration = timeframe_duration(timeframe)
-            requested_days = parse_days(days)
+            requested_sessions = (
+                parse_positive_integer(sessions, "sessions") if sessions is not None else None
+            )
+            requested_days = parse_days(days) if requested_sessions is None else None
             if response_version not in {"legacy", "execution"}:
                 raise ValueError("response_version must be legacy or execution")
         except (TypeError, ValueError) as exc:
-            return {"error": "invalid_parameter", "message": str(exc)}
+            return error_response("INVALID_PARAMETER", str(exc))
 
         try:
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at
             )
             completed = completed_as_of(source, timeframe, requested_at)
-            window_start = requested_at - pd.Timedelta(days=requested_days)
-            close_times = completed.index + duration
-            bars = completed.loc[(close_times > window_start) & (close_times <= requested_at)]
+            if requested_sessions is not None:
+                bars = select_sessions(completed, requested_sessions, normalized_asset)
+            else:
+                window_start = requested_at - pd.Timedelta(days=requested_days)
+                close_times = completed.index + duration
+                bars = completed.loc[
+                    (close_times > window_start) & (close_times <= requested_at)
+                ]
 
             if bars.empty:
-                return {
-                    "error": "no_bars_in_window",
-                    "asset": normalized_asset,
-                    "timeframe": timeframe,
-                    "requested_at": requested_at.isoformat(),
-                    "requested_days": requested_days,
-                }
+                return error_response(
+                    "NO_BARS_IN_WINDOW",
+                    "No completed bars are available in the requested chart window.",
+                    asset=normalized_asset,
+                    timeframe=timeframe,
+                    requested_at=requested_at.isoformat(),
+                )
             if len(bars) > MAX_BARS:
-                return {
-                    "error": "too_many_bars_to_render",
-                    "message": (
+                return error_response(
+                    "TOO_MANY_BARS_TO_RENDER",
+                    (
                         f"The requested window contains {len(bars)} bars; maximum is {MAX_BARS}. "
                         "Use fewer days or a larger timeframe."
                     ),
-                }
+                )
 
             metadata = {
                 "asset": normalized_asset,
@@ -79,10 +91,14 @@ class AssetChartService:
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (bars.index.max() + duration).isoformat(),
                 **bar_status(timeframe, bars.index.max(), requested_at),
-                "requested_days": requested_days,
+                "sessions_covered": sessions_covered(bars, normalized_asset),
                 "coverage_from": bars.index.min().isoformat(),
                 "coverage_to": (bars.index.max() + duration).isoformat(),
             }
+            if requested_sessions is not None:
+                metadata["requested_sessions"] = requested_sessions
+            else:
+                metadata["requested_days"] = requested_days
             if response_version == "execution":
                 decimals = infer_price_decimals(bars)
                 metadata.update(
@@ -97,11 +113,12 @@ class AssetChartService:
                 )
             return ChartResult(metadata=metadata, image_bytes=render_candles(bars, metadata))
         except Exception as exc:
-            return {
-                "error": "chart_render_failed",
-                "message": str(exc),
-                "asset": normalized_asset,
-            }
+            return error_response(
+                "CHART_RENDER_FAILED",
+                str(exc),
+                retryable=is_transient_error(exc),
+                asset=normalized_asset,
+            )
 
 
 def parse_days(value: int | str) -> int:
@@ -161,8 +178,13 @@ def render_candles(bars: pd.DataFrame, metadata: dict) -> bytes:
             "font.size": 9,
         },
     )
+    window_label = (
+        f"{metadata['requested_sessions']} sessions"
+        if "requested_sessions" in metadata
+        else f"{metadata['requested_days']} days"
+    )
     title = (
-        f"{metadata['asset']} · {metadata['timeframe']} · {metadata['requested_days']} days\n"
+        f"{metadata['asset']} · {metadata['timeframe']} · {window_label}\n"
         f"Completed bars through {metadata['coverage_to']}"
     )
 

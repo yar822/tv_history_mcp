@@ -89,11 +89,23 @@ class TvDatafeedProvider:
         result = frame.copy()
         index = pd.DatetimeIndex(result.index)
         if index.tz is None:
-            index = index.tz_localize(
-                self.settings.provider_naive_timezone,
-                ambiguous="infer",
-                nonexistent="shift_forward",
-            )
+            try:
+                index = index.tz_localize(
+                    self.settings.provider_naive_timezone,
+                    ambiguous="infer",
+                    nonexistent="shift_forward",
+                )
+            except ValueError as exc:
+                if "ambiguous" not in str(exc).lower() and "infer dst" not in str(exc).lower():
+                    raise
+                # A lone fold-hour timestamp cannot be inferred. Prefer standard
+                # time; if both occurrences exist, preserve their chronological order.
+                ambiguous = index.duplicated(keep="last")
+                index = index.tz_localize(
+                    self.settings.provider_naive_timezone,
+                    ambiguous=ambiguous,
+                    nonexistent="shift_forward",
+                )
         result.index = index.tz_convert("UTC")
         result.index.name = "timestamp_utc"
         return result[["open", "high", "low", "close", "volume"]].astype(float)

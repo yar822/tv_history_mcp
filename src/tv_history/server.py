@@ -3,13 +3,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from typing import Literal
+from typing import Annotated, Literal
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult
+from pydantic import Field
 
 from .analysis import AssetAnalysisService
+from .bars import AssetBarsService
 from .chart import AssetChartService, ChartResult
 from .config import load_settings
+from .mcp_response import mcp_result
 from .provider import TvDatafeedProvider
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
@@ -20,13 +24,14 @@ storage = CsvStorage(settings)
 provider = TvDatafeedProvider(settings)
 synchronizer = HistorySynchronizer(settings, provider, storage)
 service = AssetAnalysisService(settings, synchronizer)
+bars_service = AssetBarsService(settings, synchronizer)
 chart_service = AssetChartService(settings, synchronizer, storage)
 
 mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
         "Analyze completed current or historical market bars and generate "
-        "candlestick charts. Use EXCHANGE:SYMBOL (preferred) or the legacy "
+        "raw bar series or candlestick charts. Use EXCHANGE:SYMBOL (preferred) or the legacy "
         "SYMBOL:EXCHANGE format. Supported timeframes: 1h, 4h, 1D, and 1W."
     ),
 )
@@ -39,7 +44,9 @@ async def asset_analysis(
     timestamp: str | None = None,
     response_version: Literal["legacy", "execution"] = "legacy",
     include_indicators: bool = False,
-) -> dict:
+    include_short_term: bool = False,
+    short_term_sessions: Annotated[int, Field(ge=1)] = 4,
+) -> CallToolResult:
     """Return completed-bar market analysis at a requested time.
 
     Inputs:
@@ -51,6 +58,9 @@ async def asset_analysis(
             legacy for the original indicator-focused response. Default: legacy.
         include_indicators: In execution output, also include RSI, MACD, SMA200,
             EMA9/20/50, Bollinger Bands, ADX, and momentum change. Default: false.
+        include_short_term: Include compact efficiency, span, net, and sharp-move
+            metrics over recent trading sessions. Default: false.
+        short_term_sessions: Number of trading dates in that window. Default: 4.
 
     Uses only bars whose close is at or before timestamp. Execution output
     contains timestamps and bar status, OHLCV and previous-bar data, ATR,
@@ -58,14 +68,46 @@ async def asset_analysis(
     signal, week context, weekly VWAP, session data when applicable, and data
     quality. Numeric values use two-decimal precision.
     """
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         service.analyze,
         asset,
         timeframe,
         timestamp,
         response_version,
         include_indicators,
+        include_short_term,
+        short_term_sessions,
     )
+    return mcp_result(result)
+
+
+@mcp.tool()
+async def asset_bars(
+    asset: str,
+    timeframe: Literal["1h", "4h", "1D", "1W"] = "1h",
+    timestamp: str | None = None,
+    count: int = 100,
+    sessions: Annotated[int, Field(ge=1)] | None = None,
+) -> CallToolResult:
+    """Return raw completed OHLCV bars, ordered oldest-first.
+
+    Inputs:
+        asset: EXCHANGE:SYMBOL (preferred), for example ICEEUR:BRN1!. The legacy
+            SYMBOL:EXCHANGE form is also accepted.
+        timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
+        timestamp: ISO-8601 window cutoff. Default: current UTC time.
+        count: Completed bars counting backward from timestamp, 1-1000. Default: 100.
+        sessions: Return all bars from the last N distinct UTC trading dates.
+            When supplied, sessions takes precedence over count.
+
+    Returns OHLCV bar objects with t/o/h/l/c/v, effective close,
+    sessions and bars covered, ATR-14 on the returned series, and gap quality.
+    Bars whose close is after timestamp are never returned.
+    """
+    result = await asyncio.to_thread(
+        bars_service.get_bars, asset, timeframe, timestamp, count, sessions
+    )
+    return mcp_result(result)
 
 
 @mcp.tool()
@@ -75,7 +117,8 @@ async def asset_chart(
     timestamp: str | None = None,
     days: int | str = 10,
     response_version: Literal["legacy", "execution"] = "legacy",
-):
+    sessions: Annotated[int, Field(ge=1)] | None = None,
+) -> CallToolResult:
     """Return a PNG candlestick and volume chart ending at a requested time.
 
     Inputs:
@@ -85,19 +128,27 @@ async def asset_chart(
         timestamp: ISO-8601 chart cutoff. Default: current UTC time.
         days: Calendar days to display, from 1 through 365. Default: 10.
         response_version: legacy or execution. Default: legacy.
+        sessions: Display the last N distinct UTC trading dates. When supplied,
+            sessions takes precedence over days.
 
     Uses only bars whose close is at or before timestamp. Returns a PNG plus
-    metadata with requested/effective times, latest-bar status, requested days,
-    and chart coverage. Execution metadata also contains last_close, chart_low,
-    chart_high, and price_decimals.
+    metadata with requested/effective times, latest-bar status, sessions covered,
+    requested window, and chart coverage. Execution metadata also contains
+    last_close, chart_low, chart_high, and price_decimals.
     """
     result = await asyncio.to_thread(
-        chart_service.render, asset, timeframe, timestamp, days, response_version
+        chart_service.render,
+        asset,
+        timeframe,
+        timestamp,
+        days,
+        response_version,
+        sessions,
     )
     if isinstance(result, dict):
-        return result
+        return mcp_result(result)
     assert isinstance(result, ChartResult)
-    return [result.metadata, Image(data=result.image_bytes, format="png")]
+    return mcp_result(result.metadata, result.image_bytes)
 
 
 def main() -> None:
