@@ -7,7 +7,8 @@ import pandas as pd
 
 from .analysis import parse_timestamp, timeframe_duration
 from .config import Settings
-from .resample import completed_as_of, resample_ohlcv
+from .provider import normalize_asset
+from .resample import bar_status, completed_as_of
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
 
@@ -34,26 +35,23 @@ class AssetChartService:
         timeframe: str,
         timestamp: str | None,
         days: int | str,
+        response_version: str = "legacy",
     ) -> ChartResult | dict:
-        normalized_asset = asset.strip().upper()
-        if normalized_asset not in self.settings.assets:
-            return {
-                "error": "asset_not_configured",
-                "asset": normalized_asset,
-                "configured_assets": sorted(self.settings.assets),
-            }
-
         try:
+            normalized_asset = normalize_asset(asset)
             requested_at = parse_timestamp(timestamp)
             duration = timeframe_duration(timeframe)
             requested_days = parse_days(days)
+            if response_version not in {"legacy", "execution"}:
+                raise ValueError("response_version must be legacy or execution")
         except (TypeError, ValueError) as exc:
             return {"error": "invalid_parameter", "message": str(exc)}
 
         try:
-            hourly, refresh = self.synchronizer.ensure_available(normalized_asset, requested_at)
-            resampled = resample_ohlcv(hourly, timeframe)
-            completed = completed_as_of(resampled, timeframe, requested_at)
+            source, _refresh = self.synchronizer.ensure_available(
+                normalized_asset, timeframe, requested_at
+            )
+            completed = completed_as_of(source, timeframe, requested_at)
             window_start = requested_at - pd.Timedelta(days=requested_days)
             close_times = completed.index + duration
             bars = completed.loc[(close_times > window_start) & (close_times <= requested_at)]
@@ -65,7 +63,6 @@ class AssetChartService:
                     "timeframe": timeframe,
                     "requested_at": requested_at.isoformat(),
                     "requested_days": requested_days,
-                    "refresh": refresh,
                 }
             if len(bars) > MAX_BARS:
                 return {
@@ -76,20 +73,28 @@ class AssetChartService:
                     ),
                 }
 
-            earliest_close = completed.index.min() + duration
             metadata = {
                 "asset": normalized_asset,
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
-                "requested_from": window_start.isoformat(),
+                "effective_bar_close": (bars.index.max() + duration).isoformat(),
+                **bar_status(timeframe, bars.index.max(), requested_at),
                 "requested_days": requested_days,
-                "bars_rendered": len(bars),
                 "coverage_from": bars.index.min().isoformat(),
                 "coverage_to": (bars.index.max() + duration).isoformat(),
-                "coverage_complete": earliest_close <= window_start,
-                "source": "tvdatafeed_local_csv",
-                "refresh": refresh,
             }
+            if response_version == "execution":
+                decimals = infer_price_decimals(bars)
+                metadata.update(
+                    {
+                        "reference_prices": {
+                            "last_close": display_price(bars.iloc[-1]["close"], decimals),
+                            "chart_low": display_price(bars["low"].min(), decimals),
+                            "chart_high": display_price(bars["high"].max(), decimals),
+                        },
+                        "price_decimals": decimals,
+                    }
+                )
             return ChartResult(metadata=metadata, image_bytes=render_candles(bars, metadata))
         except Exception as exc:
             return {
@@ -109,6 +114,19 @@ def parse_days(value: int | str) -> int:
     if str(value).strip() != str(parsed) or not 1 <= parsed <= MAX_DAYS:
         raise ValueError(f"days must be an integer between 1 and {MAX_DAYS}")
     return parsed
+
+
+def infer_price_decimals(bars: pd.DataFrame) -> int:
+    decimals = 0
+    for value in bars[["open", "high", "low", "close"]].to_numpy().ravel():
+        text = f"{float(value):.10f}".rstrip("0").rstrip(".")
+        if "." in text:
+            decimals = max(decimals, len(text.rsplit(".", 1)[1]))
+    return decimals
+
+
+def display_price(value, decimals: int):
+    return round(float(value), decimals)
 
 
 def render_candles(bars: pd.DataFrame, metadata: dict) -> bytes:

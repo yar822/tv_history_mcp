@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from typing import Protocol
 
 import pandas as pd
@@ -8,8 +9,41 @@ import pandas as pd
 from .config import Settings
 
 
+KNOWN_EXCHANGES = frozenset(
+    {
+        "AMEX",
+        "BINANCE",
+        "BITSTAMP",
+        "BSE",
+        "BYBIT",
+        "CBOE",
+        "CBOT",
+        "CME",
+        "CME_MINI",
+        "COINBASE",
+        "COMEX",
+        "EURONEXT",
+        "FOREXCOM",
+        "FX_IDC",
+        "ICEEUR",
+        "ICEUS",
+        "KRAKEN",
+        "LSE",
+        "MOEX",
+        "NASDAQ",
+        "NSE",
+        "NYMEX",
+        "NYSE",
+        "OANDA",
+        "OKX",
+        "RUS",
+        "TSX",
+    }
+)
+
+
 class HistoryProvider(Protocol):
-    def get_hourly(self, asset: str, n_bars: int) -> pd.DataFrame: ...
+    def get_history(self, asset: str, timeframe: str, n_bars: int) -> pd.DataFrame: ...
 
 
 class TvDatafeedProvider:
@@ -26,14 +60,26 @@ class TvDatafeedProvider:
             self._client = TvDatafeed(username=username, password=password)
         return self._client
 
-    def get_hourly(self, asset: str, n_bars: int) -> pd.DataFrame:
+    def get_history(self, asset: str, timeframe: str, n_bars: int) -> pd.DataFrame:
         from tvDatafeed import Interval
+
+        intervals = {
+            "1h": Interval.in_1_hour,
+            "4h": Interval.in_4_hour,
+            "1D": Interval.in_daily,
+            "1W": Interval.in_weekly,
+        }
+        if timeframe not in intervals:
+            raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
+        return self._get_history(asset, n_bars, intervals[timeframe])
+
+    def _get_history(self, asset: str, n_bars: int, interval) -> pd.DataFrame:
 
         symbol, exchange = split_asset(asset)
         frame = self._get_client().get_hist(
             symbol=symbol,
             exchange=exchange,
-            interval=Interval.in_1_hour,
+            interval=interval,
             n_bars=n_bars,
             extended_session=False,
         )
@@ -54,10 +100,39 @@ class TvDatafeedProvider:
 
 
 def split_asset(asset: str) -> tuple[str, str]:
+    if not isinstance(asset, str):
+        raise ValueError("asset must use EXCHANGE:SYMBOL or SYMBOL:EXCHANGE format")
     try:
-        symbol, exchange = asset.strip().upper().rsplit(":", 1)
+        first, second = asset.strip().upper().rsplit(":", 1)
     except ValueError as exc:
-        raise ValueError("asset must use SYMBOL:EXCHANGE format") from exc
-    if not symbol or not exchange:
-        raise ValueError("asset must use SYMBOL:EXCHANGE format")
-    return symbol, exchange
+        raise ValueError("asset must use EXCHANGE:SYMBOL or SYMBOL:EXCHANGE format") from exc
+    if not first or not second:
+        raise ValueError("asset must use EXCHANGE:SYMBOL or SYMBOL:EXCHANGE format")
+    for component in (first, second):
+        if (
+            component in {".", ".."}
+            or len(component) > 128
+            or "/" in component
+            or "\\" in component
+            or any(unicodedata.category(character).startswith("C") for character in component)
+        ):
+            raise ValueError(
+                "asset symbol and exchange cannot contain path separators, "
+                "control characters, or path components"
+            )
+    if second in KNOWN_EXCHANGES and first not in KNOWN_EXCHANGES:
+        return first, second
+    if first in KNOWN_EXCHANGES:
+        return second, first
+    if any(character.isdigit() or character in "!." for character in first) and not any(
+        character.isdigit() or character in "!." for character in second
+    ):
+        return first, second
+    # TradingView notation is EXCHANGE:SYMBOL, so it is the default whenever
+    # an otherwise valid pair is ambiguous.
+    return second, first
+
+
+def normalize_asset(asset: str) -> str:
+    split_asset(asset)
+    return asset.strip().upper()

@@ -51,6 +51,25 @@ def calculate_indicators(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
         alpha=1 / atr_period, adjust=False, min_periods=atr_period
     ).mean()
 
+    adx_period = int(config.get("adx_period", 14))
+    up_move = result["high"].diff()
+    down_move = -result["low"].diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    smoothed_plus = plus_dm.ewm(
+        alpha=1 / adx_period, adjust=False, min_periods=adx_period
+    ).mean()
+    smoothed_minus = minus_dm.ewm(
+        alpha=1 / adx_period, adjust=False, min_periods=adx_period
+    ).mean()
+    result["ADX+DI"] = 100 * smoothed_plus / result["ATR"]
+    result["ADX-DI"] = 100 * smoothed_minus / result["ATR"]
+    di_sum = result["ADX+DI"] + result["ADX-DI"]
+    dx = 100 * (result["ADX+DI"] - result["ADX-DI"]).abs() / di_sum
+    result["ADX"] = dx.ewm(
+        alpha=1 / adx_period, adjust=False, min_periods=adx_period
+    ).mean()
+
     volume_period = int(config["volume_sma_period"])
     result["volume.SMA20"] = result["volume"].rolling(
         volume_period, min_periods=volume_period

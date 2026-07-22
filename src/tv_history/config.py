@@ -14,7 +14,6 @@ class Settings:
     provider_naive_timezone: str
     initial_bars: int
     refresh_overlap_bars: int
-    assets: frozenset[str]
     indicators: dict
 
 
@@ -27,13 +26,11 @@ def load_settings(path: str | Path | None = None) -> Settings:
     data_root = Path(storage["root"])
     if not data_root.is_absolute():
         data_root = project_root / data_root
-    assets = frozenset(str(asset).strip().upper() for asset in raw["assets"])
     return Settings(
         project_root=project_root,
         data_root=data_root,
         provider_naive_timezone=storage.get("provider_naive_timezone", "UTC"),
         initial_bars=int(provider.get("initial_bars", 5000)),
         refresh_overlap_bars=int(provider.get("refresh_overlap_bars", 10)),
-        assets=assets,
         indicators=dict(raw["indicators"]),
     )

@@ -42,3 +42,24 @@ def resample_ohlcv(hourly: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 def completed_as_of(frame: pd.DataFrame, timeframe: str, requested_at: pd.Timestamp) -> pd.DataFrame:
     duration = TIMEFRAME_DURATIONS[timeframe]
     return frame.loc[(frame.index + duration) <= requested_at]
+
+
+def bar_status(
+    timeframe: str,
+    bar_open: pd.Timestamp,
+    requested_at: pd.Timestamp,
+) -> dict:
+    if timeframe not in TIMEFRAME_DURATIONS:
+        raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
+
+    bar_close = bar_open + TIMEFRAME_DURATIONS[timeframe]
+
+    return {
+        "bar_open": iso_utc(bar_open),
+        "bar_close": iso_utc(bar_close),
+        "is_bar_complete": bool(bar_close <= requested_at),
+    }
+
+
+def iso_utc(timestamp: pd.Timestamp) -> str:
+    return timestamp.isoformat().replace("+00:00", "Z")

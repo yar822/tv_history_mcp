@@ -32,8 +32,49 @@ def test_chart_returns_png_and_metadata(tmp_path) -> None:
 
     assert isinstance(result, ChartResult)
     assert result.image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-    assert result.metadata["bars_rendered"] == 60
     assert result.metadata["requested_days"] == 10
+    assert result.metadata["effective_bar_close"] == "2026-01-11T08:00:00+00:00"
+    assert result.metadata["bar_open"] == "2026-01-11T04:00:00Z"
+    assert result.metadata["bar_close"] == "2026-01-11T08:00:00Z"
+    assert result.metadata["is_bar_complete"] is True
+    for removed in (
+        "requested_from", "bars_rendered", "coverage_complete", "source", "refresh",
+        "reference_prices", "price_decimals",
+    ):
+        assert removed not in result.metadata
+
+
+def test_execution_chart_returns_completed_visible_price_references(tmp_path) -> None:
+    configured = settings(tmp_path)
+    frame = hourly_frame()
+    sync = FakeSynchronizer(frame)
+    service = AssetChartService(configured, sync, CsvStorage(configured))
+
+    result = service.render(
+        "BTCUSD:BITSTAMP", "4h", "2026-01-11T09:30:00Z", "10", "execution"
+    )
+
+    assert isinstance(result, ChartResult)
+    assert result.image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert result.metadata["reference_prices"] == {
+        "last_close": 124.7,
+        "chart_low": 100.6,
+        "chart_high": 124.9,
+    }
+    assert result.metadata["price_decimals"] == 2
+    assert result.metadata["effective_bar_close"] == "2026-01-11T08:00:00+00:00"
+
+
+def test_chart_accepts_tradingview_exchange_symbol_format(tmp_path) -> None:
+    configured = settings(tmp_path)
+    sync = FakeSynchronizer(hourly_frame())
+    service = AssetChartService(configured, sync, CsvStorage(configured))
+
+    result = service.render("RUS:MX1!", "4h", "2026-01-11T09:30:00Z", "10")
+
+    assert isinstance(result, ChartResult)
+    assert result.metadata["asset"] == "RUS:MX1!"
+    assert sync.requested_timeframes == ["4h"]
 
 
 def test_invalid_days_does_not_synchronize(tmp_path) -> None:

@@ -4,14 +4,7 @@ storage:
 
 provider:
   initial_bars: 5000
-  refresh_overlap_bars: 10
-
-assets:
-  - NQ1!:CME_MINI
-  - BTCUSD:BITSTAMP
-  - BRN1!:ICEEUR
-  - GC1!:COMEX
-  - USDRUB.P:RUS
+  refresh_overlap_bars: 3
 
 indicators:
   sma: [20, 50, 200]
@@ -23,4 +16,6 @@ indicators:
   bollinger_period: 20
   bollinger_stddev: 2.0
   atr_period: 14
+  atr_daily_band_coefficient: 0.4
+  adx_period: 14
   volume_sma_period: 20

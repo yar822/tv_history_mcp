@@ -1,15 +1,12 @@
 # tv-history MCP
 
 Standalone historical asset-analysis MCP server backed by tvDatafeed and local
-1-hour CSV files.
+timeframe-specific CSV files.
 
-## Configured assets
-
-- `NQ1!:CME_MINI`
-- `BTCUSD:BITSTAMP`
-- `BRN1!:ICEEUR`
-- `GC1!:COMEX`
-- `USDRUB.P:RUS`
+Assets are loaded dynamically. TradingView-style `EXCHANGE:SYMBOL` is preferred,
+for example `RUS:MX1!`. The existing `SYMBOL:EXCHANGE` format remains accepted
+for backward compatibility. A valid request triggers an initial tvDatafeed
+download when no local history exists for that asset and timeframe.
 
 ## Install and run
 
@@ -49,6 +46,18 @@ asset_analysis(
 )
 ```
 
+The default `legacy` response remains available for existing callers. Request
+the compact, completed-bar-only trading response explicitly:
+
+```text
+asset_analysis(
+  asset="BTCUSD:BITSTAMP",
+  timeframe="4h",
+  timestamp="2026-07-01T12:00:00Z",
+  response_version="execution"
+)
+```
+
 ```text
 asset_chart(
   asset="BTCUSD:BITSTAMP",
@@ -59,13 +68,22 @@ asset_chart(
 ```
 
 `asset_chart` returns a PNG candlestick chart with red/green bodies, wicks, and
-volume, plus a metadata block describing coverage and refresh behavior.
+volume, plus a compact metadata block describing the asset and chart range.
 
-Supported timeframes are `1h`, `4h`, `1D`, and `1W`. Higher timeframes are
-resampled mechanically from the locally stored 1-hour bars. Market sessions
-and exchange calendars are intentionally not applied.
+Supported timeframes are `1h`, `4h`, `1D`, and `1W`. Each timeframe is fetched
+directly from tvDatafeed and stored independently as `1h.csv`, `4h.csv`,
+`1D.csv`, or `1W.csv`. Analysis and charts read the requested timeframe file;
+they do not construct higher-timeframe bars from `1h.csv`.
 
-An empty store requests 5,000 hourly bars. A subsequent request refreshes only
-when its timestamp is later than the latest stored timestamp. The refresh size
-is the estimated missing hours plus 10 overlapping bars, capped at 5,000. New
-and old rows are merged by timestamp, with fresh provider values winning.
+An empty timeframe store requests up to 5,000 bars. A subsequent request
+refreshes only when its timestamp is later than the latest stored timestamp for
+that timeframe. The refresh size is the estimated number of missing bars plus
+10 overlapping bars, capped at 5,000. New and old rows are merged by timestamp,
+with fresh provider values winning.
+
+Every triggered provider download is appended to `data/download_control.csv`.
+The control rows contain `asset`, `timeframe`, `requested_at`, `bars_requested`,
+`status` (`success` or `failure`), and the UTC `input_timestamp`. Existing rows
+from the older schema are preserved with a blank timeframe because it cannot be
+inferred reliably. Requests already covered by local data do not trigger a
+download and are not logged.

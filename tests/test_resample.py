@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tv_history.resample import completed_as_of, resample_ohlcv
+from tv_history.resample import bar_status, completed_as_of, resample_ohlcv
 
 
 def test_simple_four_hour_resample_and_closed_bar_filter() -> None:
@@ -27,4 +27,21 @@ def test_simple_four_hour_resample_and_closed_bar_filter() -> None:
         "low": 0,
         "close": 4,
         "volume": 40,
+    }
+
+
+def test_bar_status_uses_supplied_resampled_row() -> None:
+    bar_open = pd.Timestamp("2026-07-17T20:00:00Z")
+    inside = bar_status("4h", bar_open, pd.Timestamp("2026-07-17T21:00:00Z"))
+    assert inside == {
+        "bar_open": "2026-07-17T20:00:00Z",
+        "bar_close": "2026-07-18T00:00:00Z",
+        "is_bar_complete": False,
+    }
+
+    at_close = bar_status("4h", bar_open, pd.Timestamp("2026-07-18T00:00:00Z"))
+    assert at_close == {
+        "bar_open": "2026-07-17T20:00:00Z",
+        "bar_close": "2026-07-18T00:00:00Z",
+        "is_bar_complete": True,
     }

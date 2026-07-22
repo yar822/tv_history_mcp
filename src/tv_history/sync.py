@@ -6,7 +6,15 @@ import pandas as pd
 
 from .config import Settings
 from .provider import HistoryProvider
-from .storage import CsvStorage
+from .storage import CsvStorage, DownloadControlLog
+
+
+TIMEFRAME_DURATIONS = {
+    "1h": pd.Timedelta(hours=1),
+    "4h": pd.Timedelta(hours=4),
+    "1D": pd.Timedelta(days=1),
+    "1W": pd.Timedelta(days=7),
+}
 
 
 class HistorySynchronizer:
@@ -14,9 +22,14 @@ class HistorySynchronizer:
         self.settings = settings
         self.provider = provider
         self.storage = storage
+        self.control_log = DownloadControlLog(settings.data_root)
 
-    def ensure_available(self, asset: str, requested_at: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
-        stored = self.storage.read(asset)
+    def ensure_available(
+        self, asset: str, timeframe: str, requested_at: pd.Timestamp
+    ) -> tuple[pd.DataFrame, dict]:
+        if timeframe not in TIMEFRAME_DURATIONS:
+            raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
+        stored = self.storage.read(asset, timeframe)
         if stored.empty:
             request_bars = self.settings.initial_bars
             reason = "initial_load"
@@ -28,15 +41,22 @@ class HistorySynchronizer:
                     "reason": "requested_timestamp_is_covered",
                     "bars_requested": 0,
                 }
-            missing_hours = max(0, math.ceil((requested_at - last_stored) / pd.Timedelta(hours=1)))
+            missing_bars = max(
+                0, math.ceil((requested_at - last_stored) / TIMEFRAME_DURATIONS[timeframe])
+            )
             request_bars = min(
                 self.settings.initial_bars,
-                missing_hours + self.settings.refresh_overlap_bars,
+                missing_bars + self.settings.refresh_overlap_bars,
             )
             reason = "requested_timestamp_is_later_than_storage"
 
-        fresh = self.provider.get_hourly(asset, request_bars)
-        merged = self.storage.merge_and_write(asset, fresh)
+        try:
+            fresh = self.provider.get_history(asset, timeframe, request_bars)
+            merged = self.storage.merge_and_write(asset, fresh, timeframe)
+        except Exception:
+            self.control_log.record(asset, timeframe, requested_at, request_bars, "failure")
+            raise
+        self.control_log.record(asset, timeframe, requested_at, request_bars, "success")
         return merged, {
             "refreshed": True,
             "reason": reason,
