@@ -25,10 +25,9 @@ chart_service = AssetChartService(settings, synchronizer, storage)
 mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
-        "Tools to analyze current and historical market data and generate "
-        "candlestick charts for assets identified as EXCHANGE:SYMBOL or "
-        "SYMBOL:EXCHANGE. "
-        "Supported timeframes: 1h, 4h, 1D, and 1W."
+        "Analyze completed current or historical market bars and generate "
+        "candlestick charts. Use EXCHANGE:SYMBOL (preferred) or the legacy "
+        "SYMBOL:EXCHANGE format. Supported timeframes: 1h, 4h, 1D, and 1W."
     ),
 )
 
@@ -36,27 +35,28 @@ mcp = FastMCP(
 @mcp.tool()
 async def asset_analysis(
     asset: str,
-    timeframe: str = "1h",
+    timeframe: Literal["1h", "4h", "1D", "1W"] = "1h",
     timestamp: str | None = None,
     response_version: Literal["legacy", "execution"] = "legacy",
     include_indicators: bool = False,
 ) -> dict:
-    """Return technical analysis for an asset at a requested time.
+    """Return completed-bar market analysis at a requested time.
 
     Inputs:
         asset: EXCHANGE:SYMBOL (preferred), for example RUS:MX1!. The legacy
             SYMBOL:EXCHANGE format, for example BTCUSD:BITSTAMP, is also accepted.
         timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
-        timestamp: ISO-8601 UTC time. Default: current UTC time.
-        response_version: legacy or execution. Default: legacy.
-        include_indicators: Include raw indicators in execution output. Default: false.
+        timestamp: ISO-8601 time cutoff. Default: current UTC time.
+        response_version: execution for compact price-action trading data;
+            legacy for the original indicator-focused response. Default: legacy.
+        include_indicators: In execution output, also include RSI, MACD, SMA200,
+            EMA9/20/50, Bollinger Bands, ADX, and momentum change. Default: false.
 
-    The result uses the last completed bar at or before timestamp.
-    effective_bar_close identifies that bar. bar_open, bar_close, and
-    is_bar_complete describe the bar that supplied price_data.
-
-    execution returns a compact decision-focused response using completed bars
-    only. Numeric values use two-decimal precision.
+    Uses only bars whose close is at or before timestamp. Execution output
+    contains timestamps and bar status, OHLCV and previous-bar data, ATR,
+    recent path, market structure and trend state, actionable levels and bar
+    signal, week context, weekly VWAP, session data when applicable, and data
+    quality. Numeric values use two-decimal precision.
     """
     return await asyncio.to_thread(
         service.analyze,
@@ -71,7 +71,7 @@ async def asset_analysis(
 @mcp.tool()
 async def asset_chart(
     asset: str,
-    timeframe: str = "1h",
+    timeframe: Literal["1h", "4h", "1D", "1W"] = "1h",
     timestamp: str | None = None,
     days: int | str = 10,
     response_version: Literal["legacy", "execution"] = "legacy",
@@ -82,13 +82,14 @@ async def asset_chart(
         asset: EXCHANGE:SYMBOL (preferred), for example RUS:MX1!. The legacy
             SYMBOL:EXCHANGE format, for example BTCUSD:BITSTAMP, is also accepted.
         timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
-        timestamp: ISO-8601 UTC chart endpoint. Default: current UTC time.
+        timestamp: ISO-8601 chart cutoff. Default: current UTC time.
         days: Calendar days to display, from 1 through 365. Default: 10.
         response_version: legacy or execution. Default: legacy.
 
-    Returns a PNG chart and metadata containing the requested time, status of
-    the latest rendered bar, effective completed-bar close, and chart coverage.
-    execution also returns compact visible-chart reference prices.
+    Uses only bars whose close is at or before timestamp. Returns a PNG plus
+    metadata with requested/effective times, latest-bar status, requested days,
+    and chart coverage. Execution metadata also contains last_close, chart_low,
+    chart_high, and price_decimals.
     """
     result = await asyncio.to_thread(
         chart_service.render, asset, timeframe, timestamp, days, response_version

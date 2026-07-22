@@ -100,13 +100,20 @@ def test_refresh_adds_ten_overlap_and_fresh_rows_replace_by_timestamp(tmp_path) 
     assert result["refreshed"] is True
 
 
-def test_failed_download_is_recorded(tmp_path) -> None:
+def test_failed_download_is_retried_and_recorded_once(tmp_path, monkeypatch) -> None:
     class FailingProvider:
+        def __init__(self):
+            self.requests = []
+
         def get_history(self, asset: str, timeframe: str, n_bars: int) -> pd.DataFrame:
+            self.requests.append((asset, timeframe, n_bars))
             raise RuntimeError("provider unavailable")
 
     settings = make_settings(tmp_path)
-    sync = HistorySynchronizer(settings, FailingProvider(), CsvStorage(settings))
+    provider = FailingProvider()
+    waits = []
+    monkeypatch.setattr("tv_history.sync.time.sleep", waits.append)
+    sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         sync.ensure_available(
@@ -118,6 +125,40 @@ def test_failed_download_is_recorded(tmp_path) -> None:
     assert control.loc[0, "timeframe"] == "1W"
     assert control.loc[0, "bars_requested"] == 5000
     assert control.loc[0, "status"] == "failure"
+    assert len(control) == 1
+    assert [request[2] for request in provider.requests] == [5000, 5000, 5000, 4000, 2000]
+    assert waits == [5, 5, 5, 5]
+
+
+def test_fourth_attempt_uses_4000_and_records_one_success(tmp_path, monkeypatch) -> None:
+    class EventuallySuccessfulProvider:
+        def __init__(self):
+            self.requests = []
+
+        def get_history(self, asset: str, timeframe: str, n_bars: int) -> pd.DataFrame:
+            self.requests.append(n_bars)
+            if len(self.requests) < 4:
+                raise RuntimeError("temporary provider failure")
+            return frame("2026-01-01", [10, 11])
+
+    settings = make_settings(tmp_path)
+    provider = EventuallySuccessfulProvider()
+    waits = []
+    monkeypatch.setattr("tv_history.sync.time.sleep", waits.append)
+    sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
+
+    stored, result = sync.ensure_available(
+        "BTCUSD:BITSTAMP", "1D", pd.Timestamp("2026-01-03T00:00Z")
+    )
+
+    assert provider.requests == [5000, 5000, 5000, 4000]
+    assert waits == [5, 5, 5]
+    assert len(stored) == 2
+    assert result["bars_requested"] == 5000
+    control = pd.read_csv(settings.data_root / "download_control.csv")
+    assert len(control) == 1
+    assert control.loc[0, "bars_requested"] == 5000
+    assert control.loc[0, "status"] == "success"
 
 
 def test_storage_path_cannot_escape_data_root(tmp_path) -> None:

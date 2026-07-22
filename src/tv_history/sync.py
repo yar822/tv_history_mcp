@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import pandas as pd
 
@@ -51,7 +52,7 @@ class HistorySynchronizer:
             reason = "requested_timestamp_is_later_than_storage"
 
         try:
-            fresh = self.provider.get_history(asset, timeframe, request_bars)
+            fresh = self._download_with_retries(asset, timeframe, request_bars)
             merged = self.storage.merge_and_write(asset, fresh, timeframe)
         except Exception:
             self.control_log.record(asset, timeframe, requested_at, request_bars, "failure")
@@ -63,3 +64,22 @@ class HistorySynchronizer:
             "bars_requested": request_bars,
             "bars_received": len(fresh),
         }
+
+    def _download_with_retries(
+        self, asset: str, timeframe: str, request_bars: int
+    ) -> pd.DataFrame:
+        attempt_sizes = (
+            min(request_bars, 5000),
+            min(request_bars, 5000),
+            min(request_bars, 5000),
+            min(request_bars, 4000),
+            min(request_bars, 2000),
+        )
+        for attempt, bars in enumerate(attempt_sizes, start=1):
+            try:
+                return self.provider.get_history(asset, timeframe, bars)
+            except Exception:
+                if attempt == len(attempt_sizes):
+                    raise
+                time.sleep(5)
+        raise RuntimeError("unreachable")

@@ -81,6 +81,10 @@ that timeframe. The refresh size is the estimated number of missing bars plus
 10 overlapping bars, capped at 5,000. New and old rows are merged by timestamp,
 with fresh provider values winning.
 
+Provider failures are retried five times with a five-second wait between
+attempts. Attempts 1–3 use the original request capped at 5,000 bars, attempt 4
+caps it at 4,000, and attempt 5 caps it at 2,000.
+
 Every triggered provider download is appended to `data/download_control.csv`.
 The control rows contain `asset`, `timeframe`, `requested_at`, `bars_requested`,
 `status` (`success` or `failure`), and the UTC `input_timestamp`. Existing rows
