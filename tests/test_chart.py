@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 
 from tv_history.chart import AssetChartService, ChartResult, parse_days
@@ -40,9 +42,10 @@ def test_chart_returns_png_and_metadata(tmp_path) -> None:
     assert result.metadata["is_bar_complete"] is True
     for removed in (
         "requested_from", "bars_rendered", "coverage_complete", "source", "refresh",
-        "reference_prices", "price_decimals",
     ):
         assert removed not in result.metadata
+    assert result.metadata["reference_prices"]
+    assert result.metadata["price_decimals"] == 2
 
 
 def test_execution_chart_returns_completed_visible_price_references(tmp_path) -> None:
@@ -98,22 +101,69 @@ def test_chart_sessions_walk_back_across_weekend_and_report_coverage(tmp_path) -
     assert sessions.metadata["sessions_covered"] == 4
     assert sessions.metadata["requested_sessions"] == 4
     assert sessions.metadata["effective_bar_close"] == "2026-03-23T00:00:00+00:00"
+    assert sessions.metadata["is_bar_complete"] is True
 
 
-def test_chart_no_bars_returns_structured_error_for_both_versions(tmp_path) -> None:
+def test_chart_uses_exchange_delay_to_exclude_latest_unconfirmed_bar(
+    tmp_path, monkeypatch
+) -> None:
+    configured = replace(
+        settings(tmp_path),
+        finalization_delay_by_exchange={"ICEEUR": 25},
+    )
+    frame = hourly_frame().loc[:"2026-02-10T09:00:00Z"]
+    service = AssetChartService(configured, FakeSynchronizer(frame), CsvStorage(configured))
+    monkeypatch.setattr(
+        "tv_history.chart.current_utc_time",
+        lambda: pd.Timestamp("2026-02-10T10:24:00Z"),
+    )
+
+    before_delay = service.render(
+        "ICEEUR:BRN1!", "1h", "2026-02-10T10:24:00Z", 1
+    )
+    assert isinstance(before_delay, ChartResult)
+    assert before_delay.metadata["bar_open"] == "2026-02-10T08:00:00Z"
+    assert before_delay.metadata["is_bar_complete"] is True
+
+    monkeypatch.setattr(
+        "tv_history.chart.current_utc_time",
+        lambda: pd.Timestamp("2026-02-10T10:25:00Z"),
+    )
+    at_delay = service.render(
+        "ICEEUR:BRN1!", "1h", "2026-02-10T10:25:00Z", 1
+    )
+    assert isinstance(at_delay, ChartResult)
+    assert at_delay.metadata["bar_open"] == "2026-02-10T09:00:00Z"
+    assert at_delay.metadata["is_bar_complete"] is True
+
+
+def test_chart_no_bars_returns_structured_execution_error(tmp_path) -> None:
     configured = settings(tmp_path)
     service = AssetChartService(
         configured, FakeSynchronizer(session_frame()), CsvStorage(configured)
     )
 
-    legacy = service.render("ICEEUR:BRN1!", "1h", "2020-01-01T00:00:00Z", 4)
-    execution = service.render(
+    default = service.render("ICEEUR:BRN1!", "1h", "2020-01-01T00:00:00Z", 4)
+    explicit = service.render(
         "ICEEUR:BRN1!", "1h", "2020-01-01T00:00:00Z", 4, "execution"
     )
 
-    assert legacy == execution
-    assert legacy["error"]["code"] == "NO_BARS_IN_WINDOW"
-    assert legacy["error"]["retryable"] is False
+    assert default == explicit
+    assert default["error"]["code"] == "NO_BARS_IN_WINDOW"
+    assert default["error"]["retryable"] is False
+
+
+def test_chart_rejects_removed_legacy_response(tmp_path) -> None:
+    configured = settings(tmp_path)
+    service = AssetChartService(
+        configured, FakeSynchronizer(hourly_frame()), CsvStorage(configured)
+    )
+
+    result = service.render(
+        "BTCUSD:BITSTAMP", "1h", "2026-01-11T09:30:00Z", 4, "legacy"
+    )
+
+    assert result["error"]["code"] == "INVALID_PARAMETER"
 
 
 def test_continuous_asset_counts_weekend_dates_as_sessions(tmp_path) -> None:

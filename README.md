@@ -46,17 +46,20 @@ asset_analysis(
 )
 ```
 
-The default `legacy` response remains available for existing callers. Request
-the compact, completed-bar-only trading response explicitly:
+When `timestamp` is omitted, `price_data` may contain the latest received
+non-final bar. Its `is_bar_complete` status uses the configured exchange delay;
+all derived analysis continues to use finalized bars only.
+
+The compact execution response is the only response format and is returned by
+default. The `response_version` parameter may be omitted. Use
+`include_indicators=true` when raw indicators are needed.
 
 ```text
 asset_analysis(
   asset="BITSTAMP:BTCUSD",
   timeframe="4h",
   timestamp="2026-07-01T12:00:00Z",
-  response_version="execution",
-  include_short_term=true,
-  short_term_sessions=4
+  include_indicators=true
 )
 ```
 
@@ -69,8 +72,9 @@ asset_bars(
 )
 ```
 
-`asset_bars` returns completed OHLCV bars oldest-first. Use `count` (1–1000)
-or `sessions`; when both are supplied, `sessions` wins.
+`asset_bars` returns OHLCV bars oldest-first. It includes an opened latest bar by
+default and marks each bar with `is_bar_complete`. Use `count` (1–1000) or `sessions`;
+when both are supplied, `sessions` wins.
 
 ```text
 asset_chart(

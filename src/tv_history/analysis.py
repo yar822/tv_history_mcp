@@ -6,8 +6,9 @@ import pandas as pd
 
 from .config import Settings
 from .errors import error_response, is_transient_error
+from .finality import finality_flags, finalization_delay
 from .provider import normalize_asset
-from .resample import bar_status, completed_as_of
+from .resample import completed_as_of
 from .sync import HistorySynchronizer
 from .windows import select_sessions, sessions_covered
 
@@ -22,151 +23,86 @@ class AssetAnalysisService:
         asset: str,
         timeframe: str,
         timestamp: str | None,
-        response_version: str = "legacy",
+        response_version: str = "execution",
         include_indicators: bool = False,
-        include_short_term: bool = False,
-        short_term_sessions: int = 4,
     ) -> dict:
         try:
+            live_request = timestamp is None
             normalized_asset = normalize_asset(asset)
             requested_at = parse_timestamp(timestamp)
-            timeframe_duration(timeframe)
-            if response_version not in {"legacy", "execution"}:
-                raise ValueError("response_version must be legacy or execution")
-            if isinstance(short_term_sessions, bool) or int(short_term_sessions) < 1:
-                raise ValueError("short_term_sessions must be a positive integer")
+            duration = timeframe_duration(timeframe)
+            if response_version != "execution":
+                raise ValueError("response_version must be execution")
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at
             )
-            closed = completed_as_of(source, timeframe, requested_at)
+            if live_request:
+                evaluated_at = min(requested_at, current_utc_time())
+                opened = source.loc[source.index <= evaluated_at]
+                flags = finality_flags(
+                    opened,
+                    duration,
+                    evaluated_at,
+                    finalization_delay(self.settings, normalized_asset),
+                )
+                closed = opened.loc[flags]
+                price_bar_open = opened.index[-1] if not opened.empty else None
+                price_row = opened.iloc[-1] if not opened.empty else None
+                price_is_final = bool(flags.iloc[-1]) if not flags.empty else False
+            else:
+                closed = completed_as_of(source, timeframe, requested_at)
+                price_bar_open = closed.index[-1] if not closed.empty else None
+                price_row = closed.iloc[-1] if not closed.empty else None
+                price_is_final = True
             if closed.empty:
-                if response_version == "execution":
-                    return execution_error(
-                        "INSUFFICIENT_DATA",
-                        "No completed bars are available at or before the requested timestamp.",
-                        bars_available=0,
-                    )
-                return error_response(
+                return execution_error(
                     "INSUFFICIENT_DATA",
                     "No completed bars are available at or before the requested timestamp.",
                     bars_available=0,
                 )
 
-            if response_version == "execution":
-                minimum_bars = 80 if timeframe == "1D" else 50
-                if len(closed) < minimum_bars:
-                    return execution_error(
-                        "INSUFFICIENT_DATA",
-                        f"Execution analysis requires at least {minimum_bars} completed "
-                        f"{timeframe} bars; {len(closed)} are available.",
-                        bars_available=len(closed),
-                    )
+            minimum_bars = 80 if timeframe == "1D" else 50
+            if len(closed) < minimum_bars:
+                return execution_error(
+                    "INSUFFICIENT_DATA",
+                    f"Execution analysis requires at least {minimum_bars} completed "
+                    f"{timeframe} bars; {len(closed)} are available.",
+                    bars_available=len(closed),
+                )
 
             from .indicators import calculate_indicators
 
             calculated = calculate_indicators(closed, self.settings.indicators)
-            daily_source = source
+            daily_source = closed if live_request and timeframe == "1D" else source
             if timeframe != "1D":
                 daily_source, _daily_refresh = self.synchronizer.ensure_available(
                     normalized_asset, "1D", requested_at
                 )
-            if response_version == "execution":
-                from .execution import build_execution_response
-
-                result = build_execution_response(
-                    normalized_asset,
-                    timeframe,
-                    requested_at,
-                    daily_source,
-                    closed,
-                    calculated,
-                    self.settings.indicators,
-                    include_indicators,
-                )
-                if include_short_term:
-                    result["short_term"] = short_term_metrics(
-                        closed, int(short_term_sessions),
-                        row_atr=calculated.iloc[-1].get("ATR")
+                if live_request:
+                    daily_duration = timeframe_duration("1D")
+                    daily_opened = daily_source.loc[daily_source.index <= evaluated_at]
+                    daily_flags = finality_flags(
+                        daily_opened,
+                        daily_duration,
+                        evaluated_at,
+                        finalization_delay(self.settings, normalized_asset),
                     )
-                return result
-            row = calculated.iloc[-1]
-            previous_row = calculated.iloc[-2] if len(calculated) >= 2 else None
-            price_change = percent_change(row["open"], row["close"])
-            volume_ratio = safe_ratio(row["volume"], row["volume.SMA20"])
-            bb_width_ratio = safe_ratio(
-                row["BB.upper"] - row["BB.lower"], row["BB.middle"]
-            ) if valid(row["BB.upper"]) and valid(row["BB.lower"]) else None
-            bb_position = (
-                "ABOVE" if valid(row["BB.upper"]) and row["close"] > row["BB.upper"]
-                else "BELOW" if valid(row["BB.lower"]) and row["close"] < row["BB.lower"]
-                else "WITHIN"
-            )
-            sma = values(row, "SMA", self.settings.indicators["sma"])
-            sma["signals"] = moving_average_signals(row, "SMA")
-            ema = values(row, "EMA", self.settings.indicators["ema"])
-            ema["signals"] = moving_average_signals(row, "EMA")
-            duration = timeframe_duration(timeframe)
-            macd_key = (
-                f"macd_{int(self.settings.indicators['macd_fast'])}_"
-                f"{int(self.settings.indicators['macd_slow'])}"
-            )
+                    daily_source = daily_opened.loc[daily_flags]
+            from .execution import build_execution_response
 
-            result = {
-                "asset": normalized_asset,
-                "timeframe": timeframe,
-                "requested_at": requested_at.isoformat(),
-                "effective_bar_close": (calculated.index[-1] + duration).isoformat(),
-                **bar_status(timeframe, calculated.index[-1], requested_at),
-                "price_data": {
-                    "open": number(row["open"]),
-                    "high": number(row["high"]),
-                    "low": number(row["low"]),
-                    "close": number(row["close"]),
-                    "change_percent": number(price_change),
-                    "volume": number(row["volume"]),
-                },
-                "rsi": {
-                    "value": number(row["RSI"]),
-                    "signal": rsi_label(row["RSI"]),
-                    "direction": direction_label(
-                        row["RSI"], previous_row["RSI"] if previous_row is not None else None
-                    ),
-                    "previous": number(previous_row["RSI"]) if previous_row is not None else None,
-                },
-                macd_key: {
-                    "macd_line": number(row["MACD.macd"]),
-                    "signal_line": number(row["MACD.signal"]),
-                    "crossover": crossover_label(row["MACD.macd"], row["MACD.signal"]),
-                },
-                "sma": sma,
-                "ema": ema,
-                "bollinger_bands": {
-                    "upper": number(row["BB.upper"]),
-                    "middle": number(row["BB.middle"]),
-                    "lower": number(row["BB.lower"]),
-                    "position": bb_position,
-                    "width_ptc": number(bb_width_ratio * 100 if bb_width_ratio is not None else None),
-                    "squeeze": bool(bb_width_ratio is not None and bb_width_ratio < 0.02),
-                },
-                "atr_1D": daily_atr_bands(
-                    daily_source, requested_at, self.settings.indicators
-                ),
-                "volume_analysis": {
-                    "current": number(row["volume"]),
-                    "average_20": number(row["volume.SMA20"]),
-                    "ratio": number(volume_ratio),
-                    "signal": volume_label(volume_ratio),
-                },
-                "adx": adx_analysis(row),
-                "candle": candle_analysis(row, timeframe),
-                "support_resistance": support_resistance(
-                    source, timeframe, requested_at, float(row["close"])
-                ),
-            }
-            if include_short_term:
-                result["short_term"] = short_term_metrics(
-                    closed, int(short_term_sessions), row_atr=row.get("ATR")
-                )
+            result = build_execution_response(
+                normalized_asset,
+                timeframe,
+                requested_at,
+                daily_source,
+                closed,
+                calculated,
+                self.settings.indicators,
+                include_indicators,
+                price_row,
+                price_bar_open,
+                price_is_final,
+            )
             return result
         except ValueError as exc:
             message = str(exc)
@@ -201,6 +137,10 @@ def parse_timestamp(value: str | None) -> pd.Timestamp:
     if timestamp.tzinfo is None:
         timestamp = timestamp.tz_localize("UTC")
     return timestamp.tz_convert("UTC")
+
+
+def current_utc_time() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
 
 
 def timeframe_duration(timeframe: str) -> pd.Timedelta:

@@ -44,12 +44,55 @@ def test_execution_response_uses_completed_4h_bars_without_future_leakage(tmp_pa
     assert baseline["volatility"]["atr_14"] != baseline["volatility"]["daily_atr_14"]
 
 
-def test_execution_response_is_compact_numeric_contract_and_legacy_stays_default(tmp_path) -> None:
+def test_live_execution_exposes_provisional_price_without_using_it_in_metrics(
+    tmp_path, monkeypatch
+) -> None:
+    configured = settings(tmp_path)
+    original = hourly_frame()
+    changed = original.copy()
+    now = pd.Timestamp("2026-02-10T09:10:00Z")
+    provisional = changed.index == pd.Timestamp("2026-02-10T09:00:00Z")
+    changed.loc[provisional, ["open", "high", "low", "close", "volume"]] *= 10
+    monkeypatch.setattr("tv_history.analysis.current_utc_time", lambda: now)
+    monkeypatch.setattr("tv_history.analysis.parse_timestamp", lambda _value: now)
+
+    baseline = AssetAnalysisService(configured, FakeSynchronizer(original)).analyze(
+        "BTCUSD:BITSTAMP", "1h", None, "execution"
+    )
+    modified = AssetAnalysisService(configured, FakeSynchronizer(changed)).analyze(
+        "BTCUSD:BITSTAMP", "1h", None, "execution"
+    )
+
+    assert baseline["bar_open"] == "2026-02-10T09:00:00Z"
+    assert baseline["is_bar_complete"] is False
+    assert baseline["price_data"] != modified["price_data"]
+    assert baseline["previous_bar"]["close"] == round(
+        float(original.loc[pd.Timestamp("2026-02-10T08:00:00Z"), "close"]), 2
+    )
+    for field in (
+        "volume_analysis",
+        "candle",
+        "previous_bar",
+        "volatility",
+        "recent_path",
+        "structure",
+        "trend_state",
+        "levels",
+        "bar_signal",
+        "level_interaction",
+        "week_to_date",
+        "weekly_vwap",
+        "data_quality",
+    ):
+        assert baseline[field] == modified[field]
+
+
+def test_execution_response_is_default_and_raw_indicators_are_opt_in(tmp_path) -> None:
     configured = settings(tmp_path)
     frame = hourly_frame()
     service = AssetAnalysisService(configured, FakeSynchronizer(frame))
 
-    legacy = service.analyze("BTCUSD:BITSTAMP", "1h", "2026-02-10T09:30:00Z")
+    default = service.analyze("BTCUSD:BITSTAMP", "1h", "2026-02-10T09:30:00Z")
     execution = service.analyze(
         "BTCUSD:BITSTAMP", "1h", "2026-02-10T09:30:00Z", "execution"
     )
@@ -57,9 +100,9 @@ def test_execution_response_is_compact_numeric_contract_and_legacy_stays_default
         "BTCUSD:BITSTAMP", "1h", "2026-02-10T09:30:00Z", "execution", True
     )
 
-    assert "signals" in legacy["ema"]
+    assert default == execution
     for hidden in ("rsi", "macd_12_26", "sma", "ema", "bollinger_bands", "adx", "momentum_change"):
-        assert hidden not in execution
+        assert hidden not in default
         assert hidden in with_indicators
     assert "signals" not in with_indicators["ema"]
     assert set(with_indicators["ema"]) == {"ema9", "ema20", "ema50"}
@@ -68,7 +111,15 @@ def test_execution_response_is_compact_numeric_contract_and_legacy_stays_default
     assert "signal" not in execution["volume_analysis"]
     assert "type" not in execution["candle"]
     assert "support_resistance" not in execution
-    assert len(json.dumps(execution)) <= len(json.dumps(legacy)) * 1.25
+    assert len(json.dumps(default)) < len(json.dumps(with_indicators))
+
+
+def test_analysis_rejects_removed_legacy_response(tmp_path) -> None:
+    result = AssetAnalysisService(
+        settings(tmp_path), FakeSynchronizer(hourly_frame())
+    ).analyze("BTCUSD:BITSTAMP", "1h", "2026-02-10T09:30:00Z", "legacy")
+
+    assert result["error"]["code"] == "INVALID_PARAMETER"
 
 
 def test_execution_returns_structured_error_when_history_is_insufficient(tmp_path) -> None:
@@ -491,14 +542,14 @@ def test_trend_confidence_requires_agreeing_structure_and_drops_for_opposition()
     assert opposing["confidence"] == 0.6
 
 
-def test_trend_state_is_execution_only_and_preserves_existing_fields(tmp_path) -> None:
+def test_trend_state_is_present_in_default_execution_response(tmp_path) -> None:
     service = AssetAnalysisService(settings(tmp_path), FakeSynchronizer(hourly_frame()))
-    legacy = service.analyze("BTCUSD:BITSTAMP", "4h", "2026-02-10T09:30:00Z")
+    default = service.analyze("BTCUSD:BITSTAMP", "4h", "2026-02-10T09:30:00Z")
     execution = service.analyze(
         "BTCUSD:BITSTAMP", "4h", "2026-02-10T09:30:00Z", "execution"
     )
 
-    assert "trend_state" not in legacy
+    assert default == execution
     assert set(execution["trend_state"]) == {
         "direction", "confidence", "higher_highs", "higher_lows",
         "trend_change_confirmed",

@@ -30,8 +30,10 @@ chart_service = AssetChartService(settings, synchronizer, storage)
 mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
-        "Analyze completed current or historical market bars and generate "
-        "raw bar series or candlestick charts. Use EXCHANGE:SYMBOL (preferred) or the legacy "
+        "Analyze live or historical market bars, return raw bar series, or generate "
+        "candlestick charts. Live analysis and raw bar series may include the latest "
+        "non-final bar while derived analysis uses finalized bars only. "
+        "Use EXCHANGE:SYMBOL (preferred) or the legacy "
         "SYMBOL:EXCHANGE format. Supported timeframes: 1h, 4h, 1D, and 1W."
     ),
 )
@@ -42,28 +44,26 @@ async def asset_analysis(
     asset: str,
     timeframe: Literal["1h", "4h", "1D", "1W"] = "1h",
     timestamp: str | None = None,
-    response_version: Literal["legacy", "execution"] = "legacy",
+    response_version: Literal["execution"] = "execution",
     include_indicators: bool = False,
-    include_short_term: bool = False,
-    short_term_sessions: Annotated[int, Field(ge=1)] = 4,
 ) -> CallToolResult:
-    """Return completed-bar market analysis at a requested time.
+    """Return market analysis at a requested time.
 
     Inputs:
         asset: EXCHANGE:SYMBOL (preferred), for example RUS:MX1!. The legacy
             SYMBOL:EXCHANGE format, for example BTCUSD:BITSTAMP, is also accepted.
         timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
         timestamp: ISO-8601 time cutoff. Default: current UTC time.
-        response_version: execution for compact price-action trading data;
-            legacy for the original indicator-focused response. Default: legacy.
-        include_indicators: In execution output, also include RSI, MACD, SMA200,
+        response_version: execution. May be omitted. Default: execution.
+        include_indicators: Also include RSI, MACD, SMA200,
             EMA9/20/50, Bollinger Bands, ADX, and momentum change. Default: false.
-        include_short_term: Include compact efficiency, span, net, and sharp-move
-            metrics over recent trading sessions. Default: false.
-        short_term_sessions: Number of trading dates in that window. Default: 4.
 
-    Uses only bars whose close is at or before timestamp. Execution output
-    contains timestamps and bar status, OHLCV and previous-bar data, ATR,
+    With an explicit timestamp, uses only bars whose close is at or before it.
+    Without a timestamp, price_data may be the latest received non-final bar;
+    indicators, structure, levels, signals, and other derived metrics still use
+    finalized bars only. Bar completion uses source confirmation plus the
+    configured exchange-specific delay. Execution output contains timestamps
+    and bar status, OHLCV and previous-bar data, ATR,
     recent path, market structure and trend state, actionable levels and bar
     signal, week context, weekly VWAP, session data when applicable, and data
     quality. Numeric values use two-decimal precision.
@@ -75,8 +75,6 @@ async def asset_analysis(
         timestamp,
         response_version,
         include_indicators,
-        include_short_term,
-        short_term_sessions,
     )
     return mcp_result(result)
 
@@ -89,20 +87,22 @@ async def asset_bars(
     count: int = 100,
     sessions: Annotated[int, Field(ge=1)] | None = None,
 ) -> CallToolResult:
-    """Return raw completed OHLCV bars, ordered oldest-first.
+    """Return raw OHLCV bars, ordered oldest-first.
 
     Inputs:
         asset: EXCHANGE:SYMBOL (preferred), for example ICEEUR:BRN1!. The legacy
             SYMBOL:EXCHANGE form is also accepted.
         timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
         timestamp: ISO-8601 window cutoff. Default: current UTC time.
-        count: Completed bars counting backward from timestamp, 1-1000. Default: 100.
+        count: Bars counting backward from timestamp, 1-1000. Default: 100.
         sessions: Return all bars from the last N distinct UTC trading dates.
             When supplied, sessions takes precedence over count.
 
-    Returns OHLCV bar objects with t/o/h/l/c/v, effective close,
+    Returns OHLCV bar objects with t/is_bar_complete/o/h/l/c/v, effective close,
     sessions and bars covered, ATR-14 on the returned series, and gap quality.
-    Bars whose close is after timestamp are never returned.
+    A bar is eligible once its open is at or before the requested cutoff. The latest
+    bar may be incomplete; is_bar_complete applies source confirmation plus the
+    configured exchange-specific delay after expected close.
     """
     result = await asyncio.to_thread(
         bars_service.get_bars, asset, timeframe, timestamp, count, sessions
@@ -116,7 +116,7 @@ async def asset_chart(
     timeframe: Literal["1h", "4h", "1D", "1W"] = "1h",
     timestamp: str | None = None,
     days: int | str = 10,
-    response_version: Literal["legacy", "execution"] = "legacy",
+    response_version: Literal["execution"] = "execution",
     sessions: Annotated[int, Field(ge=1)] | None = None,
 ) -> CallToolResult:
     """Return a PNG candlestick and volume chart ending at a requested time.
@@ -127,14 +127,14 @@ async def asset_chart(
         timeframe: 1h, 4h, 1D, or 1W. Default: 1h.
         timestamp: ISO-8601 chart cutoff. Default: current UTC time.
         days: Calendar days to display, from 1 through 365. Default: 10.
-        response_version: legacy or execution. Default: legacy.
+        response_version: execution. May be omitted. Default: execution.
         sessions: Display the last N distinct UTC trading dates. When supplied,
             sessions takes precedence over days.
 
-    Uses only bars whose close is at or before timestamp. Returns a PNG plus
-    metadata with requested/effective times, latest-bar status, sessions covered,
-    requested window, and chart coverage. Execution metadata also contains
-    last_close, chart_low, chart_high, and price_decimals.
+    Renders only bars confirmed complete by a later received bar or the configured
+    exchange-specific delay after expected close. Returns a PNG plus metadata with
+    requested/effective times, latest-bar status, sessions covered, requested
+    window, chart coverage, last_close, chart_low, chart_high, and price_decimals.
     """
     result = await asyncio.to_thread(
         chart_service.render,

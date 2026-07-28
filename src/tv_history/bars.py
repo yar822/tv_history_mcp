@@ -6,9 +6,10 @@ from .analysis import parse_timestamp, timeframe_duration
 from .config import Settings
 from .errors import error_response, is_transient_error
 from .execution import data_quality, gap_overlaps_weekend
+from .finality import finality_flags, finalization_delay
 from .indicators import calculate_indicators
 from .provider import normalize_asset
-from .resample import completed_as_of, iso_utc
+from .resample import iso_utc
 from .sync import HistorySynchronizer
 from .windows import select_sessions, sessions_covered
 
@@ -42,12 +43,15 @@ class AssetBarsService:
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at
             )
-            completed = completed_as_of(source, timeframe, requested_at)
+            evaluated_at = min(requested_at, current_utc_time())
+            opened = source.loc[source.index <= evaluated_at]
             bars = (
-                select_sessions(completed, parsed_sessions)
+                select_sessions(opened, parsed_sessions)
                 if parsed_sessions is not None
-                else completed.tail(parsed_count)
+                else opened.tail(parsed_count)
             )
+            delay = finalization_delay(self.settings, normalized_asset)
+            finality = finality_flags(opened, duration, evaluated_at, delay)
             atr = None
             if not bars.empty:
                 atr = calculate_indicators(bars, self.settings.indicators).iloc[-1].get("ATR")
@@ -55,8 +59,8 @@ class AssetBarsService:
             scheduled_gaps = quality["scheduled_session_gaps"]
             if (
                 not bars.empty
-                and bars.index[-1] + duration < requested_at
-                and gap_overlaps_weekend(bars.index[-1] + duration, requested_at)
+                and bars.index[-1] + duration < evaluated_at
+                and gap_overlaps_weekend(bars.index[-1] + duration, evaluated_at)
             ):
                 scheduled_gaps += 1
             return {
@@ -66,7 +70,10 @@ class AssetBarsService:
                 "effective_bar_close": (
                     (bars.index[-1] + duration).isoformat() if not bars.empty else None
                 ),
-                "bars": [serialize_bar(index, row) for index, row in bars.iterrows()],
+                "bars": [
+                    serialize_bar(index, row, bool(finality.loc[index]))
+                    for index, row in bars.iterrows()
+                ],
                 "sessions_covered": sessions_covered(bars),
                 "bars_returned": len(bars),
                 "atr_14": finite_number(atr),
@@ -99,9 +106,10 @@ def parse_positive_integer(value, name: str) -> int:
     return parsed
 
 
-def serialize_bar(index: pd.Timestamp, row: pd.Series) -> dict:
+def serialize_bar(index: pd.Timestamp, row: pd.Series, is_final: bool) -> dict:
     return {
         "t": iso_utc(index),
+        "is_bar_complete": is_final,
         "o": float(row["open"]),
         "h": float(row["high"]),
         "l": float(row["low"]),
@@ -112,3 +120,7 @@ def serialize_bar(index: pd.Timestamp, row: pd.Series) -> dict:
 
 def finite_number(value):
     return round(float(value), 2) if value is not None and not pd.isna(value) else None
+
+
+def current_utc_time() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")

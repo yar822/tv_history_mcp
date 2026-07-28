@@ -18,10 +18,16 @@ def build_execution_response(
     calculated: pd.DataFrame,
     config: dict,
     include_indicators: bool = False,
+    price_row: pd.Series | None = None,
+    price_bar_open: pd.Timestamp | None = None,
+    price_is_final: bool = True,
 ) -> dict:
     row = calculated.iloc[-1]
     previous = calculated.iloc[-2] if len(calculated) >= 2 else None
     bar_open = calculated.index[-1]
+    displayed_row = row if price_row is None else price_row
+    displayed_bar_open = bar_open if price_bar_open is None else price_bar_open
+    displayed_is_analysis_bar = displayed_bar_open == bar_open
     atr = finite_float(row.get("ATR"))
     close = finite_float(row.get("close"))
     bb_middle = finite_float(row.get("BB.middle"))
@@ -33,7 +39,10 @@ def build_execution_response(
         else None
     )
     macd_key = f"macd_{int(config['macd_fast'])}_{int(config['macd_slow'])}"
-    previous_close = previous.get("close") if previous is not None else None
+    previous_close = (
+        previous.get("close") if displayed_is_analysis_bar and previous is not None
+        else row.get("close")
+    )
     structure = market_structure(closed, atr)
     levels = actionable_levels(closed, timeframe, requested_at, atr, structure)
     signal = bar_signal(row, previous, structure, levels, atr)
@@ -42,21 +51,27 @@ def build_execution_response(
         "asset": asset,
         "timeframe": timeframe,
         "requested_at": requested_at.isoformat(),
-        "effective_bar_close": (bar_open + TIMEFRAME_DURATIONS[timeframe]).isoformat(),
-        **bar_status(timeframe, bar_open, requested_at),
+        "effective_bar_close": (
+            displayed_bar_open + TIMEFRAME_DURATIONS[timeframe]
+        ).isoformat(),
+        **execution_bar_status(
+            timeframe, displayed_bar_open, requested_at, price_is_final
+        ),
         "price_data": {
-            "open": number(row.get("open")),
-            "high": number(row.get("high")),
-            "low": number(row.get("low")),
-            "close": number(row.get("close")),
-            "volume": number(row.get("volume")),
+            "open": number(displayed_row.get("open")),
+            "high": number(displayed_row.get("high")),
+            "low": number(displayed_row.get("low")),
+            "close": number(displayed_row.get("close")),
+            "volume": number(displayed_row.get("volume")),
             "change_open_to_close_pct": number(
-                percent_change(row.get("open"), row.get("close"))
+                percent_change(displayed_row.get("open"), displayed_row.get("close"))
             ),
             "change_from_previous_close_pct": number(
-                percent_change(previous_close, row.get("close"))
+                percent_change(previous_close, displayed_row.get("close"))
             ),
-            "opening_gap_pct": number(percent_change(previous_close, row.get("open"))),
+            "opening_gap_pct": number(
+                percent_change(previous_close, displayed_row.get("open"))
+            ),
         },
         "volume_analysis": {
             "current": number(row.get("volume")),
@@ -64,7 +79,9 @@ def build_execution_response(
             "ratio": number(safe_ratio(row.get("volume"), row.get("volume.SMA20"))),
         },
         "candle": candle_metrics(row),
-        "previous_bar": previous_bar_metrics(previous),
+        "previous_bar": previous_bar_metrics(
+            previous if displayed_is_analysis_bar else row
+        ),
         "volatility": volatility_metrics(
             row, previous, atr, close, daily_source, requested_at, timeframe, config
         ),
@@ -113,6 +130,17 @@ def build_execution_response(
             }
         )
     return result
+
+
+def execution_bar_status(
+    timeframe: str,
+    bar_open: pd.Timestamp,
+    requested_at: pd.Timestamp,
+    is_final: bool,
+) -> dict:
+    status = bar_status(timeframe, bar_open, requested_at)
+    status["is_bar_complete"] = is_final
+    return status
 
 
 def previous_bar_metrics(row: pd.Series | None) -> dict:

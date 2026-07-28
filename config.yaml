@@ -5,6 +5,11 @@ storage:
 provider:
   initial_bars: 5000
   refresh_overlap_bars: 3
+  finalization_delay_minutes: 5
+  finalization_delay_by_exchange:
+    ICEEUR: 25
+    CME_MINI: 25
+    COMEX: 25
 
 indicators:
   sma: [20, 50, 200]

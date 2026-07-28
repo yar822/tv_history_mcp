@@ -78,19 +78,51 @@ def test_asset_analysis_returns_last_completed_bar(tmp_path) -> None:
     assert result["bar_open"] == "2026-02-10T08:00:00Z"
     assert result["bar_close"] == "2026-02-10T09:00:00Z"
     assert result["is_bar_complete"] is True
-    assert "macd_12_26" in result
-    assert result["rsi"]["value"] is not None
-    assert result["rsi"]["previous"] is not None
-    assert result["rsi"]["direction"] in {"Rising", "Falling", "Flat"}
-    assert result["sma"]["signals"]
-    assert result["ema"]["signals"]
-    assert result["bollinger_bands"]["width_ptc"] is not None
-    assert isinstance(result["bollinger_bands"]["squeeze"], bool)
+    assert "macd_12_26" not in result
+    assert "trend_state" in result
+    assert result["volatility"]["atr_14"] is not None
     assert result["volume_analysis"]["current"] == result["price_data"]["volume"]
-    assert result["adx"]["value"] is not None
-    assert result["candle"]["type"] == "Neutral"
-    assert result["atr_1D"]["value"] is not None
-    assert result["support_resistance"]["pivot"] is not None
+    assert result["levels"]
+
+
+def test_live_analysis_returns_latest_received_bar_as_incomplete_price_data(
+    tmp_path, monkeypatch
+) -> None:
+    configured = settings(tmp_path)
+    frame = hourly_frame()
+    now = pd.Timestamp("2026-02-10T09:10:00Z")
+    monkeypatch.setattr("tv_history.analysis.current_utc_time", lambda: now)
+    monkeypatch.setattr("tv_history.analysis.parse_timestamp", lambda _value: now)
+    service = AssetAnalysisService(configured, FakeSynchronizer(frame))
+
+    result = service.analyze("BTCUSD:BITSTAMP", "1h", None)
+
+    provisional = frame.loc[pd.Timestamp("2026-02-10T09:00:00Z")]
+    finalized = frame.loc[pd.Timestamp("2026-02-10T08:00:00Z")]
+    assert result["bar_open"] == "2026-02-10T09:00:00Z"
+    assert result["bar_close"] == "2026-02-10T10:00:00Z"
+    assert result["is_bar_complete"] is False
+    assert result["price_data"]["close"] == round(float(provisional["close"]), 2)
+    assert result["volume_analysis"]["current"] == round(float(finalized["volume"]), 2)
+
+
+def test_live_analysis_finalizes_latest_bar_after_exchange_delay(
+    tmp_path, monkeypatch
+) -> None:
+    configured = settings(tmp_path)
+    frame = hourly_frame().loc[:"2026-02-10T09:00:00Z"]
+    now = pd.Timestamp("2026-02-10T10:05:00Z")
+    monkeypatch.setattr("tv_history.analysis.current_utc_time", lambda: now)
+    monkeypatch.setattr("tv_history.analysis.parse_timestamp", lambda _value: now)
+
+    result = AssetAnalysisService(configured, FakeSynchronizer(frame)).analyze(
+        "BTCUSD:BITSTAMP", "1h", None
+    )
+
+    assert result["bar_open"] == "2026-02-10T09:00:00Z"
+    assert result["is_bar_complete"] is True
+    # With no later source bar, the configured five-minute delay confirms it.
+    assert result["volume_analysis"]["current"] == 1000.0
 
 
 def test_invalid_timeframe_does_not_synchronize(tmp_path) -> None:
@@ -206,30 +238,6 @@ def test_small_candle_is_neutral_by_timeframe() -> None:
     assert candle_analysis(row, "1D")["type"] == "Bullish"
 
 
-def test_short_term_block_is_optional_and_uses_requested_sessions(tmp_path) -> None:
-    configured = settings(tmp_path)
-    service = AssetAnalysisService(configured, FakeSynchronizer(hourly_frame()))
-
-    without = service.analyze(
-        "BITSTAMP:BTCUSD", "1h", "2026-02-11T00:00:00Z"
-    )
-    with_block = service.analyze(
-        "BITSTAMP:BTCUSD",
-        "1h",
-        "2026-02-11T00:00:00Z",
-        include_short_term=True,
-        short_term_sessions=4,
-    )
-
-    assert "short_term" not in without
-    assert with_block["short_term"]["sessions_covered"] == 4
-    assert with_block["short_term"]["bars_used"] == 96
-    assert set(with_block["short_term"]) == {
-        "sessions_covered", "bars_used", "efficiency_ratio", "span_atr",
-        "net_atr", "sharp_move_atr", "sharp_move_bars",
-    }
-
-
 def test_short_term_efficiency_is_null_for_flat_path() -> None:
     index = pd.date_range("2026-01-01", periods=20, freq="1h", tz="UTC")
     frame = pd.DataFrame(
@@ -249,11 +257,11 @@ def test_analysis_error_shape_is_identical_and_dst_error_is_not_retryable(tmp_pa
 
     service = AssetAnalysisService(settings(tmp_path), AmbiguousSynchronizer())
 
-    legacy = service.analyze("BITSTAMP:BTCUSD", "4h", "2026-01-12T04:00:00Z")
-    execution = service.analyze(
+    default = service.analyze("BITSTAMP:BTCUSD", "4h", "2026-01-12T04:00:00Z")
+    explicit = service.analyze(
         "BITSTAMP:BTCUSD", "4h", "2026-01-12T04:00:00Z", "execution"
     )
 
-    assert legacy == execution
-    assert legacy["error"]["code"] == "DATA_PROVIDER_ERROR"
-    assert legacy["error"]["retryable"] is False
+    assert default == explicit
+    assert default["error"]["code"] == "DATA_PROVIDER_ERROR"
+    assert default["error"]["retryable"] is False

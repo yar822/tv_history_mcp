@@ -9,8 +9,9 @@ from .analysis import parse_timestamp, timeframe_duration
 from .bars import parse_positive_integer
 from .config import Settings
 from .errors import error_response, is_transient_error
+from .finality import finality_flags, finalization_delay
 from .provider import normalize_asset
-from .resample import bar_status, completed_as_of
+from .resample import bar_status
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
 from .windows import select_sessions, sessions_covered
@@ -38,7 +39,7 @@ class AssetChartService:
         timeframe: str,
         timestamp: str | None,
         days: int | str,
-        response_version: str = "legacy",
+        response_version: str = "execution",
         sessions: int | None = None,
     ) -> ChartResult | dict:
         try:
@@ -49,8 +50,8 @@ class AssetChartService:
                 parse_positive_integer(sessions, "sessions") if sessions is not None else None
             )
             requested_days = parse_days(days) if requested_sessions is None else None
-            if response_version not in {"legacy", "execution"}:
-                raise ValueError("response_version must be legacy or execution")
+            if response_version != "execution":
+                raise ValueError("response_version must be execution")
         except (TypeError, ValueError) as exc:
             return error_response("INVALID_PARAMETER", str(exc))
 
@@ -58,7 +59,16 @@ class AssetChartService:
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at
             )
-            completed = completed_as_of(source, timeframe, requested_at)
+            evaluated_at = min(requested_at, current_utc_time())
+            opened = source.loc[source.index <= evaluated_at]
+            completed = opened.loc[
+                finality_flags(
+                    opened,
+                    duration,
+                    evaluated_at,
+                    finalization_delay(self.settings, normalized_asset),
+                )
+            ]
             if requested_sessions is not None:
                 bars = select_sessions(completed, requested_sessions)
             else:
@@ -99,18 +109,17 @@ class AssetChartService:
                 metadata["requested_sessions"] = requested_sessions
             else:
                 metadata["requested_days"] = requested_days
-            if response_version == "execution":
-                decimals = infer_price_decimals(bars)
-                metadata.update(
-                    {
-                        "reference_prices": {
-                            "last_close": display_price(bars.iloc[-1]["close"], decimals),
-                            "chart_low": display_price(bars["low"].min(), decimals),
-                            "chart_high": display_price(bars["high"].max(), decimals),
-                        },
-                        "price_decimals": decimals,
-                    }
-                )
+            decimals = infer_price_decimals(bars)
+            metadata.update(
+                {
+                    "reference_prices": {
+                        "last_close": display_price(bars.iloc[-1]["close"], decimals),
+                        "chart_low": display_price(bars["low"].min(), decimals),
+                        "chart_high": display_price(bars["high"].max(), decimals),
+                    },
+                    "price_decimals": decimals,
+                }
+            )
             return ChartResult(metadata=metadata, image_bytes=render_candles(bars, metadata))
         except Exception as exc:
             return error_response(
@@ -131,6 +140,10 @@ def parse_days(value: int | str) -> int:
     if str(value).strip() != str(parsed) or not 1 <= parsed <= MAX_DAYS:
         raise ValueError(f"days must be an integer between 1 and {MAX_DAYS}")
     return parsed
+
+
+def current_utc_time() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
 
 
 def infer_price_decimals(bars: pd.DataFrame) -> int:
