@@ -6,6 +6,7 @@ import os
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult
 from pydantic import Field
 
@@ -27,6 +28,14 @@ service = AssetAnalysisService(settings, synchronizer)
 bars_service = AssetBarsService(settings, synchronizer)
 chart_service = AssetChartService(settings, synchronizer, storage)
 
+transport_security = TransportSecuritySettings(
+    allowed_hosts=[
+        "100.123.186.70:*",
+        "localhost:*",
+        "127.0.0.1:*",
+    ],
+)
+
 mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
@@ -36,6 +45,7 @@ mcp = FastMCP(
         "Use EXCHANGE:SYMBOL (preferred) or the legacy "
         "SYMBOL:EXCHANGE format. Supported timeframes: 1h, 4h, 1D, and 1W."
     ),
+    transport_security=transport_security,
 )
 
 
