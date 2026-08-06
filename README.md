@@ -20,6 +20,9 @@ HTTP transport:
 
 ```powershell
 uv run tv-history-mcp streamable-http --host 127.0.0.1 --port 8010
+
+#or for Tailscale IP
+uv run tv-history-mcp streamable-http --host 0.0.0.0 --port 8010 
 ```
 
 The MCP endpoint is `http://127.0.0.1:8010/mcp`.
