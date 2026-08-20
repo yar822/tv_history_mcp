@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import unicodedata
 from typing import Protocol
 
@@ -50,6 +51,11 @@ class TvDatafeedProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client = None
+        # tvDatafeed reuses one chart session and swaps its websocket on every
+        # get_hist call, so concurrent calls interleave frames from different
+        # assets and one request can be answered with another asset's bars.
+        # All downloads must run one at a time.
+        self._download_lock = threading.Lock()
 
     def _get_client(self):
         if self._client is None:
@@ -71,7 +77,8 @@ class TvDatafeedProvider:
         }
         if timeframe not in intervals:
             raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
-        return self._get_history(asset, n_bars, intervals[timeframe])
+        with self._download_lock:
+            return self._get_history(asset, n_bars, intervals[timeframe])
 
     def _get_history(self, asset: str, n_bars: int, interval) -> pd.DataFrame:
 
