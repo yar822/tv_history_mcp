@@ -3,8 +3,22 @@ storage:
   provider_naive_timezone: Europe/Istanbul
 
 provider:
+  # Explicit mapping supersedes the legacy RUS list. Unknown assets stay raw.
+  # Unverified dates retain standard fallback and are reported in metadata.
+  timestamp_profiles:
+    "RUS:MX1!": moex_futures
+    "RUS:SI1!": moex_futures
+    "COMEX:GC1!": cme_overnight
+    "CME_MINI:NQ1!": cme_overnight
+    "ICEEUR:BRN1!": ice_brent
+    "BITSTAMP:BTCUSD": utc_calendar
   initial_bars: 5000
   refresh_overlap_bars: 5
+  # MX1/SI1 session template: normalizes 1D and 1W; [] disables both.
+  # RUS:YDEX has separate weekend daily bars and must not use this profile.
+  rus_daily_trading_date_assets:
+    - "RUS:MX1!"
+    - "RUS:SI1!"
   finalization_delay_minutes: 5
   finalization_delay_by_exchange:
     ICEEUR: 15

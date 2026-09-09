@@ -65,14 +65,18 @@ class AssetBarsService:
                 scheduled_gaps += 1
             return {
                 "asset": normalized_asset,
+                **({"timestamp_normalization": source.attrs["timestamp_normalization"]}
+                   if "timestamp_normalization" in source.attrs else {}),
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (
                     (bars.index[-1] + duration).isoformat() if not bars.empty else None
                 ),
                 "bars": [
-                    serialize_bar(index, row, bool(finality.loc[index]))
-                    for index, row in bars.iterrows()
+                    serialize_bar(index, row, bool(flag))
+                    for (index, row), flag in zip(
+                        bars.iterrows(), finality.iloc[len(opened) - len(bars):]
+                    )
                 ],
                 "sessions_covered": sessions_covered(bars),
                 "bars_returned": len(bars),
@@ -108,6 +112,8 @@ def parse_positive_integer(value, name: str) -> int:
 
 def serialize_bar(index: pd.Timestamp, row: pd.Series, is_final: bool) -> dict:
     return {
+        **({key: row[key] for key in ("source_timestamp", "timestamp_basis", "timestamp_evidence", "timestamp_ambiguous")}
+           if "source_timestamp" in row else {}),
         "t": iso_utc(index),
         "is_bar_complete": is_final,
         "o": float(row["open"]),

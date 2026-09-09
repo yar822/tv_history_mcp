@@ -97,6 +97,8 @@ class AssetChartService:
 
             metadata = {
                 "asset": normalized_asset,
+                **({"timestamp_normalization": source.attrs["timestamp_normalization"]}
+                   if "timestamp_normalization" in source.attrs else {}),
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (bars.index.max() + duration).isoformat(),

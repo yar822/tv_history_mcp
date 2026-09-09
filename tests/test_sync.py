@@ -37,9 +37,9 @@ def test_project_settings_load_finalization_delays() -> None:
 
     assert configured.finalization_delay_minutes == 5
     assert configured.finalization_delay_by_exchange == {
-        "ICEEUR": 25,
-        "CME_MINI": 25,
-        "COMEX": 25,
+        "ICEEUR": 15,
+        "CME_MINI": 15,
+        "COMEX": 15,
     }
 
 

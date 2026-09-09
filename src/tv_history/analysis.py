@@ -103,6 +103,10 @@ class AssetAnalysisService:
                 price_bar_open,
                 price_is_final,
             )
+            if "timestamp_normalization" in source.attrs:
+                result["timestamp_normalization"] = source.attrs["timestamp_normalization"]
+            if "timestamp_normalization" in daily_source.attrs:
+                result["daily_timestamp_normalization"] = daily_source.attrs["timestamp_normalization"]
             return result
         except ValueError as exc:
             message = str(exc)
