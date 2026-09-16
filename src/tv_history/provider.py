@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import unicodedata
+from pathlib import Path
 from typing import Protocol
 
 import pandas as pd
@@ -63,7 +64,13 @@ class TvDatafeedProvider:
 
             username = os.environ.get("TRADINGVIEW_USERNAME") or None
             password = os.environ.get("TRADINGVIEW_PASSWORD") or None
-            self._client = TvDatafeed(username=username, password=password)
+            client = TvDatafeed(username=username, password=password)
+            token_file = Path(__file__).resolve().parents[2] / "_token.txt"
+            if token_file.is_file():
+                token = token_file.read_text(encoding="utf-8-sig").strip()
+                if token:
+                    client.token = token
+            self._client = client
         return self._client
 
     def get_history(self, asset: str, timeframe: str, n_bars: int) -> pd.DataFrame:
@@ -79,6 +86,13 @@ class TvDatafeedProvider:
             raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
         with self._download_lock:
             return self._get_history(asset, n_bars, intervals[timeframe])
+
+    def get_metadata(self, asset: str) -> dict:
+        from .provider_metadata import collect_metadata
+
+        symbol, exchange = split_asset(asset)
+        with self._download_lock:
+            return collect_metadata(f"{exchange}:{symbol}", self._get_client().token)
 
     def _get_history(self, asset: str, n_bars: int, interval) -> pd.DataFrame:
 

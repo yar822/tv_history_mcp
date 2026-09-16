@@ -4,6 +4,28 @@ from tv_history.timestamp_profiles import profile_date, served_profile
 from test_trading_dates import frame
 
 
+def test_weekly_profile_normalizes_daily_once_and_preserves_metadata(monkeypatch):
+    import tv_history.timestamp_profiles as profiles
+    import tv_history.trading_dates as dates
+    daily = frame(['2026-03-02T00:00Z', '2026-03-09T00:00Z'])
+    empty = daily.iloc[:0]
+    cutoff = pd.Timestamp('2026-03-10T00:00Z')
+    expected = served_profile(daily, daily, empty, empty, cutoff, '1W', 'utc_calendar')
+    calls = []
+    original = profiles.normalize_daily
+    def tracked(*args, **kwargs):
+        calls.append(len(args[0]))
+        return original(*args, **kwargs)
+    def unexpected(*args, **kwargs):
+        pytest.fail('weekly normalization repeated an already available daily mapping')
+    monkeypatch.setattr(profiles, 'normalize_daily', tracked)
+    monkeypatch.setattr(dates, 'normalize_daily', unexpected)
+    actual = served_profile(daily, daily, empty, empty, cutoff, '1W', 'utc_calendar')
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual.attrs == expected.attrs
+    assert calls == [2]
+
+
 @pytest.mark.parametrize('profile,raw,date', [
     ('cme_overnight','2026-03-01T23:00Z','2026-03-02'),
     ('cme_overnight','2026-03-08T22:00Z','2026-03-09'),
@@ -119,3 +141,10 @@ def test_service_profile_retains_fallback_bar_and_reports_it(tmp_path):
     assert 'error' not in response
     assert response['bars'][0]['t'] == '2026-07-03T00:00:00Z'
     assert response['timestamp_normalization']['unverified_rows'] == 1
+
+
+import pytest as _pytest
+
+@_pytest.fixture(autouse=True)
+def existing_partial_cache_without_network_bootstrap(monkeypatch):
+    monkeypatch.setattr("tv_history.sync.HistorySynchronizer._initialize", lambda *args: False)

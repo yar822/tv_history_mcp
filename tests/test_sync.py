@@ -59,19 +59,19 @@ def frame(start: str, closes: list[float], freq: str = "1h") -> pd.DataFrame:
 
 def test_initial_load_requests_5000_bars(tmp_path) -> None:
     settings = make_settings(tmp_path)
-    provider = FakeProvider([frame("2026-01-01", [10, 11])])
+    provider = FakeProvider([frame("2026-01-01", [10, 11]) for _ in range(4)])
     sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
 
     stored, result = sync.ensure_available(
         "BTCUSD:BITSTAMP", "4h", pd.Timestamp("2026-01-01T08:00Z")
     )
 
-    assert provider.requests == [("BTCUSD:BITSTAMP", "4h", 5000)]
+    assert provider.requests == [("BITSTAMP:BTCUSD", tf, 5000) for tf in ("1h", "4h", "1D", "1W")]
     assert result["reason"] == "initial_load"
     assert len(stored) == 2
     control = pd.read_csv(settings.data_root / "download_control.csv")
-    assert control.loc[0, "asset"] == "BTCUSD:BITSTAMP"
-    assert control.loc[0, "timeframe"] == "4h"
+    assert control.loc[0, "asset"] == "BITSTAMP:BTCUSD"
+    assert control.loc[0, "timeframe"] == "1h"
     assert control.loc[0, "requested_at"] == "2026-01-01T08:00:00+00:00"
     assert control.loc[0, "bars_requested"] == 5000
     assert control.loc[0, "status"] == "success"
@@ -80,7 +80,7 @@ def test_initial_load_requests_5000_bars(tmp_path) -> None:
 
 def test_covered_timestamp_does_not_refresh(tmp_path) -> None:
     settings = make_settings(tmp_path)
-    provider = FakeProvider([frame("2026-01-01", [10, 11])])
+    provider = FakeProvider([frame("2026-01-01", [10, 11]) for _ in range(4)])
     sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
     sync.ensure_available("BTCUSD:BITSTAMP", "1h", pd.Timestamp("2026-01-01T02:00Z"))
 
@@ -88,26 +88,30 @@ def test_covered_timestamp_does_not_refresh(tmp_path) -> None:
         "BTCUSD:BITSTAMP", "1h", pd.Timestamp("2026-01-01T00:30Z")
     )
 
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == 4
     assert result["refreshed"] is False
 
 
-def test_refresh_adds_ten_overlap_and_fresh_rows_replace_by_timestamp(tmp_path) -> None:
+def test_refresh_adds_ten_overlap_and_fresh_rows_replace_by_timestamp(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("tv_history.sync.current_utc_time", lambda: pd.Timestamp("2026-01-01T03:00Z"))
     settings = make_settings(tmp_path)
     provider = FakeProvider(
         [
-            frame("2026-01-01T00:00Z", [10, 11]),
+            *[frame("2026-01-01T00:00Z", [10, 11]) for _ in range(4)],
             frame("2026-01-01T01:00Z", [99, 12, 13]),
         ]
     )
     sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
     sync.ensure_available("BTCUSD:BITSTAMP", "1h", pd.Timestamp("2026-01-01T01:00Z"))
+    # This test models a later refresh, outside the successful-fetch reuse window.
+    later = 100.0 + sync._successful_refresh_at[("BITSTAMP:BTCUSD", "1h")]
+    monkeypatch.setattr("tv_history.sync.time.monotonic", lambda: later)
 
     stored, result = sync.ensure_available(
         "BTCUSD:BITSTAMP", "1h", pd.Timestamp("2026-01-01T03:00Z")
     )
 
-    assert provider.requests[-1] == ("BTCUSD:BITSTAMP", "1h", 12)
+    assert provider.requests[-1] == ("BITSTAMP:BTCUSD", "1h", 12)
     assert stored.loc[pd.Timestamp("2026-01-01T01:00Z"), "close"] == 99
     assert len(stored) == 4
     assert result["refreshed"] is True
@@ -134,8 +138,8 @@ def test_failed_download_is_retried_and_recorded_once(tmp_path, monkeypatch) -> 
         )
 
     control = pd.read_csv(settings.data_root / "download_control.csv")
-    assert control.loc[0, "asset"] == "ETHUSD:BITSTAMP"
-    assert control.loc[0, "timeframe"] == "1W"
+    assert control.loc[0, "asset"] == "BITSTAMP:ETHUSD"
+    assert control.loc[0, "timeframe"] == "1h"
     assert control.loc[0, "bars_requested"] == 5000
     assert control.loc[0, "status"] == "failure"
     assert len(control) == 1
@@ -164,12 +168,12 @@ def test_fourth_attempt_uses_4000_and_records_one_success(tmp_path, monkeypatch)
         "BTCUSD:BITSTAMP", "1D", pd.Timestamp("2026-01-03T00:00Z")
     )
 
-    assert provider.requests == [5000, 5000, 5000, 4000]
+    assert provider.requests == [5000, 5000, 5000, 4000, 5000, 5000, 5000]
     assert waits == [5, 5, 5]
     assert len(stored) == 2
     assert result["bars_requested"] == 5000
     control = pd.read_csv(settings.data_root / "download_control.csv")
-    assert len(control) == 1
+    assert len(control) == 4
     assert control.loc[0, "bars_requested"] == 5000
     assert control.loc[0, "status"] == "success"
 
@@ -234,8 +238,8 @@ def test_provider_localizes_single_dst_fold_hour_without_inference_error(tmp_pat
 def test_each_timeframe_is_downloaded_cached_and_stored_separately(tmp_path) -> None:
     settings = make_settings(tmp_path)
     four_hour = frame("2026-01-01", [100, 101], "4h")
-    weekly = frame("2025-12-22", [90, 100], "7D")
-    provider = FakeProvider([four_hour, weekly])
+    weekly = frame("2025-12-29", [90, 100], "7D")
+    provider = FakeProvider([four_hour, four_hour, four_hour, weekly])
     storage = CsvStorage(settings)
     sync = HistorySynchronizer(settings, provider, storage)
 
@@ -250,7 +254,7 @@ def test_each_timeframe_is_downloaded_cached_and_stored_separately(tmp_path) -> 
     assert len(second) == 2
     assert storage.path_for("BTCUSD:BITSTAMP", "4h").exists()
     assert storage.path_for("BTCUSD:BITSTAMP", "1W").exists()
-    assert not storage.path_for("BTCUSD:BITSTAMP", "1h").exists()
+    assert storage.path_for("BTCUSD:BITSTAMP", "1h").exists()
 
 
 def test_download_control_migrates_old_schema(tmp_path) -> None:
@@ -262,7 +266,7 @@ def test_download_control_migrates_old_schema(tmp_path) -> None:
         "BTCUSD:BITSTAMP,2026-01-01T00:00:00+00:00,10,success,2026-01-01T00:01:00+00:00\n",
         encoding="utf-8",
     )
-    provider = FakeProvider([frame("2026-01-01", [10])])
+    provider = FakeProvider([frame("2026-01-01", [10]) for _ in range(4)])
     sync = HistorySynchronizer(settings, provider, CsvStorage(settings))
 
     sync.ensure_available("ETHUSD:BITSTAMP", "1D", pd.Timestamp("2026-01-02T00:00Z"))
@@ -272,4 +276,4 @@ def test_download_control_migrates_old_schema(tmp_path) -> None:
         "asset", "timeframe", "requested_at", "bars_requested", "status", "input_timestamp"
     ]
     assert control.loc[0, "timeframe"] == ""
-    assert control.loc[1, "timeframe"] == "1D"
+    assert control.loc[1, "timeframe"] == "1h"

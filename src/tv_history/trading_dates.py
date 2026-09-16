@@ -71,7 +71,7 @@ def normalize_daily(
         raise ValueError("RUS hourly evidence requires unique sorted source bars")
     labels, bases, checks = [], [], []
     observed_at = pd.Timestamp.now(tz="UTC")
-    for position, (opened, row) in enumerate(source.iterrows()):
+    for position, (opened, row) in enumerate(zip(source.index, source.itertuples(index=False))):
         label = date_rule(opened)
         basis = "standard_session_rule"
         following = source.index[position + 1] if position + 1 < len(source) else None
@@ -84,7 +84,7 @@ def normalize_daily(
         if following is not None:
             check = "four_hour_unavailable_or_unbracketed"
             if following <= observed_at and opened in four_hour.index and following in four_hour.index:
-                segment = four_hour.loc[(four_hour.index >= opened) & (four_hour.index < following)]
+                segment = four_hour.iloc[four_hour.index.searchsorted(opened):four_hour.index.searchsorted(following)]
                 check = "four_hour_interval_overlaps_successor"
                 overlaps = segment.loc[segment.index + pd.Timedelta(hours=4) > following]
                 hourly_verified = False
@@ -95,7 +95,7 @@ def normalize_daily(
                     hourly_verified = len(overlaps) == 1 and overlaps.index[0] == segment.index[-1]
                     if hourly_verified:
                         start = overlaps.index[0]
-                        hours = hourly.loc[(hourly.index >= start) & (hourly.index < following)]
+                        hours = hourly.iloc[hourly.index.searchsorted(start):hourly.index.searchsorted(following)]
                         expected = pd.date_range(start, following, freq="1h", inclusive="left")
                         hourly_verified = (
                             following in hourly.index
@@ -111,9 +111,9 @@ def normalize_daily(
                         check = "session_end_hourly_verification_failed"
                 if not segment.empty and (overlaps.empty or hourly_verified):
                     matches = all(math.isclose(float(a), float(b), rel_tol=0, abs_tol=1e-8) for a, b in (
-                        (segment.iloc[0]["open"], row["open"]),
-                        (segment["high"].max(), row["high"]),
-                        (segment["low"].min(), row["low"]),
+                        (segment.iloc[0]["open"], row.open),
+                        (segment["high"].max(), row.high),
+                        (segment["low"].min(), row.low),
                     ))
                     check = "four_hour_ohl_mismatch"
                     holiday_tail = False
@@ -147,11 +147,11 @@ def normalize_daily(
                             if (len(tail) >= 2 and contiguous and shape_matches and reaches_end):
                                 matches = all(math.isclose(float(a), float(b), rel_tol=0, abs_tol=1e-8)
                                               for a, b in (
-                                                  (tail.iloc[0]["open"], row["open"]),
-                                                  (tail["high"].max(), row["high"]),
-                                                  (tail["low"].min(), row["low"]),
+                                                  (tail.iloc[0]["open"], row.open),
+                                                  (tail["high"].max(), row.high),
+                                                  (tail["low"].min(), row.low),
                                               ))
-                                volume_matches = math.isclose(float(tail["volume"].sum()), float(row["volume"]), rel_tol=0, abs_tol=1e-8)
+                                volume_matches = math.isclose(float(tail["volume"].sum()), float(row.volume), rel_tol=0, abs_tol=1e-8)
                                 matches = matches and (volume_matches or not volume_required)
                                 holiday_tail = matches
                     if matches:
@@ -206,6 +206,8 @@ def normalize_weekly(
     date_rule=standard_date,
     ending_timezone="Europe/Moscow",
     holiday_policy=None,
+    *,
+    mapped_daily: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Label source weeks by the Monday of their opening trading date.
 
@@ -217,24 +219,25 @@ def normalize_weekly(
         return source.copy()
     if source.index.has_duplicates or not source.index.is_monotonic_increasing:
         raise ValueError("RUS timestamp normalization requires unique sorted source bars")
-    mapped_daily = normalize_daily(daily, four_hour, evaluated_at, hourly=hourly, date_rule=date_rule, ending_timezone=ending_timezone, holiday_policy=holiday_policy)
+    if mapped_daily is None:
+        mapped_daily = normalize_daily(daily, four_hour, evaluated_at, hourly=hourly, date_rule=date_rule, ending_timezone=ending_timezone, holiday_policy=holiday_policy)
     daily_dates = {
-        row["source_timestamp"]: (label, row)
-        for label, row in mapped_daily.iterrows()
+        row.source_timestamp: (label, row)
+        for label, row in zip(mapped_daily.index, mapped_daily.itertuples(index=False))
     }
     labels, bases, evidence, ambiguous = [], [], [], []
-    for opened, row in source.iterrows():
+    for opened, row in zip(source.index, source.itertuples(index=False)):
         date = date_rule(opened)
         basis, check, uncertain = "standard_session_rule", "opening_daily_unavailable", False
         match = daily_dates.get(opened.isoformat().replace("+00:00", "Z"))
         if match is not None:
             daily_date, daily_row = match
             check = "opening_daily_open_mismatch"
-            if math.isclose(float(row["open"]), float(daily_row["open"]), rel_tol=0, abs_tol=1e-8):
+            if math.isclose(float(row.open), float(daily_row.open), rel_tol=0, abs_tol=1e-8):
                 date = daily_date
-                basis = "opening_daily_" + daily_row["timestamp_basis"]
-                check = daily_row["timestamp_evidence"]
-                uncertain = bool(daily_row["timestamp_ambiguous"])
+                basis = "opening_daily_" + daily_row.timestamp_basis
+                check = daily_row.timestamp_evidence
+                uncertain = bool(daily_row.timestamp_ambiguous)
         labels.append(date - pd.Timedelta(days=date.weekday()))
         bases.append(basis)
         evidence.append(check)

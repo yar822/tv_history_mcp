@@ -2,28 +2,52 @@ storage:
   root: data
   provider_naive_timezone: Europe/Istanbul
 
+market_rules:
+  exchanges:
+    RUS:
+      timezone: Europe/Moscow
+      timestamp_profile: moex_futures
+      symbols:
+        # Equities retain native daily/weekly labels; timezone is inherited.
+        SBER: {timestamp_profile: null}
+        YDEX: {timestamp_profile: null}
+    COMEX:
+      timezone: America/Chicago
+      timestamp_profile: cme_overnight
+    CME_MINI:
+      timezone: America/Chicago
+      timestamp_profile: cme_overnight
+    ICEEUR:
+      timezone: Europe/London
+      timestamp_profile: ice_brent
+    BITSTAMP:
+      timezone: UTC
+      timestamp_profile: utc_calendar
+
 provider:
-  # Explicit mapping supersedes the legacy RUS list. Unknown assets stay raw.
-  # Unverified dates retain standard fallback and are reported in metadata.
-  timestamp_profiles:
-    "RUS:MX1!": moex_futures
-    "RUS:SI1!": moex_futures
-    "COMEX:GC1!": cme_overnight
-    "CME_MINI:NQ1!": cme_overnight
-    "ICEEUR:BRN1!": ice_brent
-    "BITSTAMP:BTCUSD": utc_calendar
   initial_bars: 5000
   refresh_overlap_bars: 5
-  # MX1/SI1 session template: normalizes 1D and 1W; [] disables both.
-  # RUS:YDEX has separate weekend daily bars and must not use this profile.
-  rus_daily_trading_date_assets:
-    - "RUS:MX1!"
-    - "RUS:SI1!"
   finalization_delay_minutes: 5
   finalization_delay_by_exchange:
     ICEEUR: 15
     CME_MINI: 15
     COMEX: 15
+  # Boundary exceptions only; ordinary latest bars always await a successor.
+  finalization_delay_by_asset:
+    "RUS:MX1!": 5
+    "RUS:SI1!": 5
+    "COMEX:GC1!": 15
+    "CME_MINI:NQ1!": 15
+    "ICEEUR:BRN1!": 15
+
+calendar:
+  completed_sessions: 30
+  lookback_days: 90
+  min_observations: 4
+  min_agreement: 0.9
+  # asset -> timeframe -> raw UTC opening ISO timestamp -> actual close ISO timestamp.
+  # Date-specific overrides must use timezone-aware values.
+  boundary_overrides: {}
 
 indicators:
   sma: [20, 50, 200]

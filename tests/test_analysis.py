@@ -19,7 +19,7 @@ class FakeSynchronizer:
         self.calls = 0
         self.requested_timeframes: list[str] = []
 
-    def ensure_available(self, asset: str, timeframe: str, requested_at: pd.Timestamp):
+    def ensure_available(self, asset: str, timeframe: str, requested_at: pd.Timestamp, **kwargs):
         self.calls += 1
         self.requested_timeframes.append(timeframe)
         direct = self.frame if timeframe == "1h" else resample_ohlcv(self.frame, timeframe)
@@ -106,7 +106,7 @@ def test_live_analysis_returns_latest_received_bar_as_incomplete_price_data(
     assert result["volume_analysis"]["current"] == round(float(finalized["volume"]), 2)
 
 
-def test_live_analysis_finalizes_latest_bar_after_exchange_delay(
+def test_live_analysis_keeps_latest_bar_incomplete_after_exchange_delay(
     tmp_path, monkeypatch
 ) -> None:
     configured = settings(tmp_path)
@@ -120,8 +120,8 @@ def test_live_analysis_finalizes_latest_bar_after_exchange_delay(
     )
 
     assert result["bar_open"] == "2026-02-10T09:00:00Z"
-    assert result["is_bar_complete"] is True
-    # With no later source bar, the configured five-minute delay confirms it.
+    assert result["is_bar_complete"] is False
+    # Elapsed time alone cannot confirm an ordinary latest bar.
     assert result["volume_analysis"]["current"] == 1000.0
 
 

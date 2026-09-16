@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import socket
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -23,10 +24,10 @@ from .sync import HistorySynchronizer
 settings = load_settings()
 storage = CsvStorage(settings)
 provider = TvDatafeedProvider(settings)
-synchronizer = HistorySynchronizer(settings, provider, storage)
-service = AssetAnalysisService(settings, synchronizer)
-bars_service = AssetBarsService(settings, synchronizer)
-chart_service = AssetChartService(settings, synchronizer, storage)
+synchronizer = None
+service = None
+bars_service = None
+chart_service = None
 
 transport_security = TransportSecuritySettings(
     allowed_hosts=[
@@ -72,7 +73,8 @@ async def asset_analysis(
     Without a timestamp, price_data may be the latest received non-final bar;
     indicators, structure, levels, signals, and other derived metrics still use
     finalized bars only. Bar completion uses source confirmation plus the
-    configured exchange-specific delay. Execution output contains timestamps
+    asset-specific delay only at a verified session/period end, with a fresh download.
+    Ordinary latest bars await a successor. Execution output contains timestamps
     and bar status, OHLCV and previous-bar data, ATR,
     recent path, market structure and trend state, actionable levels and bar
     signal, week context, weekly VWAP, session data when applicable, and data
@@ -86,6 +88,7 @@ async def asset_analysis(
         response_version,
         include_indicators,
     )
+    await add_provider_metadata(result, asset)
     return mcp_result(result)
 
 
@@ -112,11 +115,14 @@ async def asset_bars(
     sessions and bars covered, ATR-14 on the returned series, and gap quality.
     A bar is eligible once its open is at or before the requested cutoff. The latest
     bar may be incomplete; is_bar_complete applies source confirmation plus the
-    configured exchange-specific delay after expected close.
+    asset-specific delay at a verified session/period end with fresh target data.
+    Responses add completion_reason, completion_boundary and completion_calendar.
+    A new ticker initializes 1h/4h/1D/1W history before answering.
     """
     result = await asyncio.to_thread(
         bars_service.get_bars, asset, timeframe, timestamp, count, sessions
     )
+    await add_provider_metadata(result, asset)
     return mcp_result(result)
 
 
@@ -142,7 +148,8 @@ async def asset_chart(
             sessions takes precedence over days.
 
     Renders only bars confirmed complete by a later received bar or the configured
-    exchange-specific delay after expected close. Returns a PNG plus metadata with
+    asset-specific delay at a verified session/period end with fresh target data.
+    Returns a PNG plus metadata with
     requested/effective times, latest-bar status, sessions covered, requested
     window, chart coverage, last_close, chart_low, chart_high, and price_decimals.
     """
@@ -156,12 +163,25 @@ async def asset_chart(
         sessions,
     )
     if isinstance(result, dict):
+        await add_provider_metadata(result, asset)
         return mcp_result(result)
     assert isinstance(result, ChartResult)
+    await add_provider_metadata(result.metadata, asset)
     return mcp_result(result.metadata, result.image_bytes)
 
 
+async def add_provider_metadata(result, asset):
+    if synchronizer is not None:
+        try:
+            result["provider_metadata"] = await asyncio.to_thread(
+                synchronizer.get_provider_metadata, asset)
+        except (ValueError, OSError):
+            from .provider_metadata import unknown_metadata
+            result["provider_metadata"] = unknown_metadata()
+
+
 def main() -> None:
+    global synchronizer, service, bars_service, chart_service
     parser = argparse.ArgumentParser(description="TradingView historical analysis MCP server")
     parser.add_argument(
         "transport",
@@ -172,6 +192,17 @@ def main() -> None:
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8010")))
     args = parser.parse_args()
+    if args.transport == "streamable-http":
+        try:
+            check_listen_address(args.host, args.port)
+        except OSError as exc:
+            parser.error(f"Cannot start MCP on {args.host}:{args.port}: {exc}. "
+                         "Stop the existing listener or choose another port. "
+                         "No history refresh was started.")
+    synchronizer = HistorySynchronizer(settings, provider, storage, refresh_on_start=True)
+    service = AssetAnalysisService(settings, synchronizer)
+    bars_service = AssetBarsService(settings, synchronizer)
+    chart_service = AssetChartService(settings, synchronizer, storage)
 
     if args.transport == "stdio":
         mcp.run()
@@ -179,6 +210,15 @@ def main() -> None:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")
+
+
+def check_listen_address(host: str, port: int) -> None:
+    """Fail before backups/downloads if another process already owns the port."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind((host, port))
 
 
 if __name__ == "__main__":

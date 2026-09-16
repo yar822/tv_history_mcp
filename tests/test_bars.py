@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pandas as pd
+import pytest
 
 from tv_history.bars import (
     AssetBarsService,
@@ -13,6 +14,46 @@ from tv_history.analysis import short_term_metrics
 from tv_history.mcp_response import mcp_result
 
 from test_analysis import FakeSynchronizer, settings
+
+
+def test_small_response_checks_only_returned_rows_with_full_successor_evidence(tmp_path, monkeypatch):
+    import tv_history.bars as module
+    from test_analysis import hourly_frame
+    source = hourly_frame()
+    successor = source.index[-1] + pd.Timedelta(hours=1)
+    source.attrs["completion_context"] = {
+        "timeframe": "1h", "raw_opens": [t.isoformat() for t in source.index] + [successor.isoformat()]}
+    original = module.completion_details
+    expected = original(source, pd.Timedelta(hours=1), successor, pd.Timedelta(minutes=5)).tail(3)
+    sizes = []
+    def tracked(opened, *args):
+        sizes.append(len(opened))
+        assert len(opened.attrs["completion_context"]["raw_opens"]) == len(source) + 1
+        return original(opened, *args)
+    monkeypatch.setattr(module, "completion_details", tracked)
+    result = AssetBarsService(settings(tmp_path), FakeSynchronizer(source)).get_bars(
+        "BITSTAMP:BTCUSD", "1h", successor.isoformat(), count=3)
+    assert sizes == [3]
+    assert [{k: bar[k] for k in expected.columns} for bar in result["bars"]] == expected.to_dict("records")
+    assert result["bars"][-1]["is_bar_complete"] is True
+    assert "completion_context" in source.attrs
+
+
+@pytest.mark.parametrize("fetched,cutoff,complete,reason", [
+    (None, "2026-09-01T16:06Z", False, "awaiting_fresh_data"),
+    ("2026-09-01T16:04Z", "2026-09-01T16:06Z", False, "awaiting_fresh_data"),
+    ("2026-09-01T16:05Z", "2026-09-01T16:06Z", True, "session_boundary_delay"),
+    ("2026-09-01T16:05Z", "2026-09-01T16:04Z", False, "awaiting_boundary_delay"),
+])
+def test_selected_bar_retains_boundary_and_receipt_evidence(tmp_path, fetched, cutoff, complete, reason):
+    from test_calendar_finality import ASSET, calendar, configured, with_evidence
+    source = with_evidence(calendar(tmp_path), "1h", "2026-09-01T15:00Z", fetched)
+    cfg = replace(configured(tmp_path), indicators=settings(tmp_path).indicators)
+    result = AssetBarsService(cfg, FakeSynchronizer(source)).get_bars(
+        ASSET, "1h", cutoff, count=1)
+    assert result["bars"][0]["is_bar_complete"] is complete
+    assert result["bars"][0]["completion_reason"] == reason
+    assert pd.Timestamp(result["bars"][0]["completion_boundary"]) == pd.Timestamp("2026-09-01T16:00Z")
 
 
 def session_frame() -> pd.DataFrame:
@@ -70,7 +111,7 @@ def test_asset_bars_sessions_include_latest_opened_bar_oldest_first(tmp_path) ->
     assert result["bars"][-1]["is_bar_complete"] is False
     assert result["bars"][-2]["is_bar_complete"] is True
     assert set(result["bars"][-1]) == {
-        "t", "is_bar_complete", "o", "h", "l", "c", "v"
+        "t", "is_bar_complete", "completion_reason", "completion_boundary", "o", "h", "l", "c", "v"
     }
 
 
@@ -143,7 +184,7 @@ def test_asset_bars_rejects_count_above_cap_when_sessions_are_absent(tmp_path) -
     assert result["error"]["code"] == "INVALID_PARAMETER"
 
 
-def test_finality_uses_later_bar_then_exchange_delay() -> None:
+def test_finality_requires_successor_without_calendar_evidence() -> None:
     frame = session_frame().iloc[-3:-1]
     duration = pd.Timedelta(hours=1)
 
@@ -161,7 +202,7 @@ def test_finality_uses_later_bar_then_exchange_delay() -> None:
     )
 
     assert before_delay.tolist() == [True, False]
-    assert at_delay.tolist() == [True, True]
+    assert at_delay.tolist() == [True, False]
 
 
 def test_finalization_delay_uses_default_and_exchange_overrides(tmp_path) -> None:

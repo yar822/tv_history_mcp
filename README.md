@@ -3,12 +3,33 @@
 Standalone historical asset-analysis MCP server backed by tvDatafeed and local
 timeframe-specific CSV files.
 
+See [CHANGELOG.md](CHANGELOG.md) for dated changes and validation results.
+
 Assets are loaded dynamically. TradingView-style `EXCHANGE:SYMBOL` is preferred,
 for example `RUS:MX1!`. The existing `SYMBOL:EXCHANGE` format remains accepted
-for backward compatibility. A valid request triggers an initial tvDatafeed
-download when no local history exists for that asset and timeframe.
+for backward compatibility. A new ticker request initializes all four native
+timeframes (1h, 4h, 1D, 1W) before answering, independent of response count.
 
 ## Install and run
+
+### Provider metadata
+
+Analysis, bars, and chart MCP responses include `provider_metadata`, for example:
+
+```json
+{"provider_metadata": {"resolved_symbol": "COMEX_DL:GC1!", "delay_seconds": 600, "auth_token": true}}
+```
+
+A separate symbol-only lookup runs once per known ticker at startup, and once
+before the first response for a new ticker. The result is stored in the ticker's
+existing `coverage.json` and reused until restart. It does not change OHLCV
+extraction or completion rules. Lookups are serialized with provider downloads.
+`delay_seconds: null` means no numeric delay was reported. `auth_token` is true
+when symbol resolution succeeds after token authentication, false for anonymous
+access or explicit rejection, and null when status cannot be established.
+Lookup failures return unknown metadata without preventing normal bar requests.
+Each unavailable ticker can add up to the lookup timeout (5 seconds, plus connection
+cleanup) to startup. Restart to refresh metadata after changing the token.
 
 ```powershell
 cd C:\_tools\202607_tradingview_mcp\tv_history
@@ -50,7 +71,8 @@ asset_analysis(
 ```
 
 When `timestamp` is omitted, `price_data` may contain the latest received
-non-final bar. Its `is_bar_complete` status uses the configured exchange delay;
+non-final bar. Its `is_bar_complete` status uses successor confirmation or a
+verified session-boundary exception with fresh data;
 all derived analysis continues to use finalized bars only.
 
 The compact execution response is the only response format and is returned by
@@ -98,6 +120,192 @@ Supported timeframes are `1h`, `4h`, `1D`, and `1W`. Each timeframe is fetched
 directly from tvDatafeed and stored independently as `1h.csv`, `4h.csv`,
 `1D.csv`, or `1W.csv`. Analysis and charts read the requested timeframe file;
 they do not construct higher-timeframe bars from `1h.csv`.
+
+### Completion policy and frozen calendars (2026-09-09)
+
+Restart MCP to activate these changes. Running agent-loop processes retain bars
+they already consumed; this update does not rewrite earlier trading decisions.
+
+Live validation on September 9 identified repeated pandas metadata copies during
+row iteration, especially with large BTC history. The follow-up fix keeps receipt
+and calendar evidence outside per-row iteration and normalization inputs. Restart
+MCP again if it was launched before that fix. The completion policy is unchanged.
+
+Cached responses reuse the normalized price view when coverage checking has not
+changed source data. Weekly profiles share the already computed daily mapping;
+raw-bar responses evaluate completion only for returned rows while retaining full
+raw successor and receipt evidence. Normalization still examines the supporting
+history and returns its existing diagnostics. Data repairs rebuild the view.
+Download/mutation locking is retained. See the changelog for before/after response
+comparisons and cached-request timing results; restart MCP to load the optimization.
+
+Ordinary latest bars remain incomplete regardless of elapsed time. A later raw
+source bar in the same asset/timeframe series confirms the preceding bar. Raw
+source timestamps determine ordering even when 1D/1W labels are normalized.
+
+Without a successor, completion requires a confidently learned physical boundary
+and a successful download **started after boundary + asset delay**, containing
+the target candle. Receipt metadata includes an OHLCV fingerprint so stale receipt
+evidence cannot authenticate a changed CSV row. Default delay is five minutes;
+asset overrides take precedence over exchange overrides and the default. The
+same asset delay applies to 1h/4h/1D/1W. It is not applied to ordinary intraday bars.
+These delays do not guarantee immunity from later provider/settlement corrections.
+
+Startup first backs up the caches, then checks per-ticker metadata in
+`coverage.json`. If the four CSV file sizes/modification times, relevant settings,
+checker version and saved calendar file are unchanged, it reuses the calendar and
+gap-check result without reading price files or downloading history. Missing
+metadata or changed inputs trigger calendar rebuilding and a local gap check of
+the last 100 calendar days ending at the ticker's latest cached timestamp. One
+preceding bar is retained to detect holes crossing the check window's boundary.
+An old cache alone does not trigger a startup download. A shorter intraday tail
+can trigger repair if another cached intraday timeframe proves trading continued;
+the check never treats the interval from the cache end to now as a missing range.
+
+Only timeframes with unexplained gaps not already attempted receive a full-batch
+repair. After merging, startup rechecks coverage and rebuilds the calendar if data
+changed. Failed repairs retain cached data and error/attempt records; other
+affected timeframes continue. Unresolved intervals remain explicit, and a restart
+alone does not repeat the same unsuccessful repair. Metadata is saved after the
+check and any repairs. Historical requests older than the startup window still
+receive a full local coverage audit in the normal request path.
+
+New tickers build calendars after completing four-timeframe initialization.
+Ordinary downloads do not rebuild calendars; changed files invalidate their
+startup metadata for the next launch. Runtime hourly observations contradicting
+a predicted break suspend the affected rule without learning a replacement.
+Completion flags still evaluate current cutoff and fresh receipt evidence per
+request; they are not cached in startup metadata. Importing the server module
+does not start downloads. Direct synchronizer users opt into the startup check
+and selective repair lifecycle with `refresh_on_start=True` (the MCP entry point
+does so).
+
+For HTTP transport, the entry point checks the configured listen address before
+starting backups or history downloads. If another process owns the port, it exits
+with a clear error and does not refresh the caches. Stop the old MCP instance
+before launching its replacement on the same port.
+
+The learner selects 30 qualifying trading-session dates within a 90-day bound.
+Contiguous hourly segments are grouped by their local starting date, so multiple
+segments around an intraday break count once. Overnight segments retain their
+starting date. The first/last partial runs, anomalous segment shapes, and dates
+missing expected segments are excluded. Recent weekday/start-time templates need
+at least four observations and 90% agreement; older matching dates may fill the
+30-date window. Unknown timezones or insufficient data disable learned exceptions.
+`market_rules.exchanges` is the shared source for calendar timezones and daily/
+weekly timestamp profiles. Each ticker inherits its exchange's `timezone` and
+`timestamp_profile`; entries under `symbols` override individual fields. An
+omitted field inherits its default, while `timestamp_profile: null` explicitly
+preserves native timestamp labels. Symbol names are case-insensitive bare ticker
+names, and requests accept both EXCHANGE:SYMBOL and SYMBOL:EXCHANGE.
+
+RUS defaults to Europe/Moscow and moex_futures, with explicit null profile
+exceptions for SBER and YDEX. COMEX/CME_MINI default to America/Chicago and
+cme_overnight, ICEEUR to Europe/London and ice_brent, and BITSTAMP to UTC and
+utc_calendar. This intentionally applies the configured profile to new tickers;
+add symbol exceptions for instruments using different date conventions. Session
+hours and breaks are still learned separately per ticker. Unconfigured exchanges
+retain native labels and have no learned boundary exceptions without a timezone.
+
+Restart MCP after changes to rebuild existing calendars. Local civil times,
+rather than fixed UTC offsets, instantiate boundaries across DST. Profiles now
+receive the same resolved timezone used by the calendar. Legacy profile/timezone
+configuration remains supported when `market_rules` is absent; mixing both
+formats is rejected to avoid ambiguous precedence. Legacy defaults in Python
+exist only for compatibility, not as a timezone source for unified market rules.
+
+1h exceptions apply before physical breaks; 4h exceptions require the native
+candle to end there (including verified shortened final candles). 1D/1W exceptions
+require the final segment of the native daily/weekly period. Native O/H/L must
+match the corresponding hourly history; settlement close and volume are not used
+to infer ownership. There must be sufficient repeated evidence for **each** rule.
+A ready calendar may therefore have no verified weekly rule: those weekly bars
+continue waiting for successors. Continuous markets have no midnight physical-break
+exception. Sub-hour closures cannot be inferred from hourly timestamps; learned
+ends conservatively use the last hourly opening plus one hour.
+
+Date-specific overrides support known special closes. Example (illustrative only):
+
+```yaml
+market_rules:
+  exchanges:
+    RUS:
+      timezone: Europe/Moscow
+      timestamp_profile: moex_futures
+      symbols:
+        SBER: {timestamp_profile: null}
+        YDEX: {timestamp_profile: null}
+    NASDAQ:
+      timezone: America/New_York
+      timestamp_profile: null
+calendar:
+  completed_sessions: 30
+  lookback_days: 90
+  min_observations: 4
+  min_agreement: 0.9
+  boundary_overrides:
+    "NASDAQ:EXAMPLE":
+      1D:
+        "2026-09-01T13:30:00Z": "2026-09-01T17:00:00Z"
+```
+
+Overrides map the **raw native opening**, not the normalized trading label, to
+the actual period close. They still require the asset delay and fresh target data.
+
+New ticker initialization downloads 1h, 4h, 1D, and 1W at `provider.initial_bars`
+(currently 5000). Each download retains retry caps 5000/5000/5000/4000/2000, each
+bounded by that configured limit, with five-second retry waits. Concurrent
+requests share initialization. Successful timeframes persist across failures and
+restarts; subsequent requests retry missing timeframes. MCP startup selectively
+repairs gaps detected in changed caches. Initialization and gap-repair downloads
+can take longer than ordinary calls.
+
+New local artifacts, beside the unchanged OHLCV CSV files:
+
+- `data/ticker_registry.json`: initialized timeframes by canonical ticker.
+- `<asset>/calendar.json`: one shared weekday session schedule in the exchange
+  timezone, with named start/end times and day offsets for overnight sessions.
+  Verified native bar alignments refer to those sessions across 1h/4h/1D/1W;
+  reopening times are derived from the schedule unless a verified provider
+  exception requires an explicit override. Unknown alignments remain unknown.
+- `<asset>/coverage.json`: the latest startup check, each unresolved gap once
+  with its repair-attempt flag, and the remaining completion receipt evidence.
+  Resolved repair markers and duplicate startup gap snapshots are not stored.
+- `<asset>/revisions.jsonl`: changed OHLCV values, timeframe and observation time;
+  routine updates of the previously latest cached bar are excluded. Legacy
+  timeframe revision logs are consolidated at startup or on the next merge.
+- `data/download_coverage.jsonl`: actual response sizes/ranges, overlap and added rows.
+- `data/backups/<UTC timestamp>.zip`: cache, metadata and log snapshot before startup downloads.
+
+Legacy `<timeframe>.receipts.json` files are migrated into `coverage.json` at
+startup (after the normal backup), or before a storage merge. They are removed
+only after the consolidated document is written successfully. Receipt evidence
+is pruned conservatively: when a bar's successor is at or before the calendar's
+effective date, no historical cutoff can need that receipt. Earlier cutoffs
+cannot use that calendar; later cutoffs already have the successor. The latest
+bar and all potentially relevant later evidence remain, retaining the request
+start time and OHLCV fingerprint. This is deliberately safer than keeping only
+one receipt per timeframe. Historical-cutoff completion behavior is preserved. Coverage updates preserve receipt
+evidence under the storage write lock. Storage keeps at most 16 parsed coverage
+documents in memory, invalidated by file size/modification time, to avoid parsing
+all four timeframe receipt maps on every read. Receipt evidence is internal and
+does not appear in the public `history_coverage` response.
+
+Bars add `completion_reason` and nullable `completion_boundary`; all endpoints
+add `completion_calendar` metadata. Reasons include `successor_received`,
+`session_boundary_delay`, `period_boundary_delay`, `awaiting_successor`,
+`awaiting_boundary_delay`, `awaiting_fresh_data`, and `calendar_unavailable`.
+Existing fields/types are retained. Legacy nominal `bar_close`/`effective_bar_close`
+fields retain their prior timestamp convention; `completion_boundary` carries the
+physical boundary used by a timeout. Strict consumers asserting exact JSON key
+sets must allow the additions. Bars, explicit/live analysis, and charts use the
+same completion evaluator; downstream daily indicators receive finalized data.
+
+A historical cutoff limits eligible source bars and successors. A calendar built
+today cannot authorize a boundary exception before its effective time. Historical
+OHLCV remains reconstructed, potentially revised history, not an immutable record
+of what was received live. Live download responses can arrive after their request
+timestamp; that transport delay does not invalidate fresh boundary evidence.
 
 ### RUS daily trading-date timestamps (2026-09-07)
 
@@ -227,11 +435,33 @@ ending by the `16:00Z` successor boundary. This applies to daily normalization
 and weekly opening-day evidence, uses only existing local hourly storage, and
 does not alter source prices or require agent-loop changes. Restart MCP to load.
 
-An empty timeframe store requests up to 5,000 bars. A subsequent request
-refreshes only when its timestamp is later than the latest stored timestamp for
-that timeframe. The refresh size is the estimated number of missing bars plus
-10 overlapping bars, capped at 5,000. New and old rows are merged by timestamp,
-with fresh provider values winning.
+An empty timeframe store requests the full configured batch (currently 5,000).
+For a tail refresh, estimate bars from the newest cached raw timestamp to the
+actual download time, plus `refresh_overlap_bars` (currently five). Never size a
+latest-history download from a historical query cutoff: tvDatafeed does not
+receive that cutoff. If a small response has no shared timestamps with the cache,
+try the full batch. Valid rows are merged by raw timestamp, with fresh values
+winning and changes recorded in the revision log.
+
+Historical coverage is checked within the requested count/session/date window,
+not inferred from the cache maximum. Unexplained gaps or insufficient historical
+reach trigger one full-batch repair attempt. Persisted interval markers prevent
+the same unresolved gap causing repeated full downloads; startup rechecks changed
+caches and preserves those repair markers.
+An exact resumption matching a verified calendar rule can explain a closure;
+merely overlapping a weekend cannot. Cross-timeframe activity confirms intraday
+holes, while ambiguous daily/weekly ownership remains uncertain. Native daily or
+weekly candles can legitimately span holiday tails. No synthetic candles are
+inserted. Provider history limits may leave old gaps unresolved.
+
+All endpoints expose `history_coverage` with `no_known_gaps`, `uncertain`, or
+`incomplete`, plus unresolved intervals and available range. This is evidence of
+coverage, not a guarantee the provider itself has a perfect history. Bar requests
+can return partial data with this metadata. Analysis returns
+`INSUFFICIENT_HISTORY_COVERAGE` if confirmed missing/unavailable data affects its
+calculation history, including its daily auxiliary input. A stale cache without
+proof of missing trading bars remains uncertain rather than being called covered.
+`data_quality.unexpected_missing_bars` preserves null for unknown cases.
 
 Provider failures are retried five times with a five-second wait between
 attempts. Attempts 1–3 use the original request capped at 5,000 bars, attempt 4
@@ -317,8 +547,9 @@ The range definitions live in timestamp_profiles.py::SESSION_PROFILES. Restart
 MCP to load this change. Raw storage, OHLCV, loop and adapter are unchanged.
 
 ### Exchange/product-specific 4h holiday verification (2026-09-08)
-`timestamp_profiles.py::SESSION_PROFILES` now owns timezone, evening range,
-holiday-tail session shape and volume policy together. MOEX retains daytime
+`timestamp_profiles.py::SESSION_PROFILES` owns the evening range,
+holiday-tail session shape and volume policy. Timezones now come from the unified
+market rules described above (superseding the original profile timezone). MOEX retains daytime
 03–06UTC reopening, one local date and exact O/H/L/volume. CME allows an evening
 opening in its local range followed by the next local date, bounded to at most
 25 elapsed hours (DST allowance). Brent permits that overnight shape or a morning
@@ -334,3 +565,22 @@ Stored cases verified: GC July7,2025 / June22,2026 / July6,2026; NQ July7,2025 /
 June22,2026; MX/SI January5,2026. Both daily and weekly labels belong to the proper
 Monday and fail that Monday's pre-week admission filter. Restart MCP to activate;
 this is not a guarantee for other unmatched historical cases.
+
+Calendar schema 2 is a storage format: the runtime derives its existing boundary
+lookup from the shared sessions and verified bar alignment. This retains native
+provider ownership checks, date overrides, suspended rules, DST handling and the
+public completion response shape. Existing files convert on startup after the
+usual backup; unchanged calendars retain their effective date and version.
+
+### Reusing simultaneous monitor refreshes
+
+A successful provider fetch is reused for 10 seconds per canonical asset and
+native timeframe within one MCP process. The timer starts after the fetch is
+successfully stored and uses a monotonic clock. Waiting callers check it under
+the synchronizer lock, so monitors can share a fetch without overlapping provider
+calls. Each response still applies its own cutoff, count/sessions and completion
+rules to the cached prices. Fetch timestamps and completion evidence are never
+advanced by reuse. Forming-bar prices may therefore be up to 10 seconds older
+than a new fetch would return. Failed fetches do not enable reuse; coverage repair
+and disjoint-history fallback still perform their required downloads. Restart MCP
+to load this change; the reuse timer is in memory and resets on restart.

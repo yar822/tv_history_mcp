@@ -131,7 +131,7 @@ def test_execution_returns_structured_error_when_history_is_insufficient(tmp_pat
 
     assert result["error"]["code"] == "INSUFFICIENT_DATA"
     assert result["error"]["retryable"] is False
-    assert result["error"]["bars_available"] == 5
+    assert result["error"]["bars_available"] == 4
 
 
 def test_week_to_date_resets_monday_and_excludes_later_observations() -> None:
@@ -215,6 +215,7 @@ def test_gap_and_close_to_close_returns_are_separate(tmp_path) -> None:
     frame = hourly_frame().iloc[:60].copy()
     frame.loc[frame.index[-2], "close"] = 100.0
     frame.loc[frame.index[-1], ["open", "high", "low", "close"]] = [90.0, 92.0, 89.0, 91.0]
+    frame = pd.concat([frame, hourly_frame().iloc[60:61]])  # observed successor
     result = AssetAnalysisService(configured, FakeSynchronizer(frame)).analyze(
         "BRN1!:ICEEUR", "1h", "2026-01-03T12:00:00Z", "execution"
     )
@@ -263,7 +264,7 @@ def test_futures_weekend_gap_is_not_reported_as_unexpected() -> None:
     result = data_quality(frame, "4h", "BRN1!:ICEEUR")
 
     assert result["unexpected_missing_bars"] is None
-    assert result["scheduled_session_gaps"] == 1
+    assert result["scheduled_session_gaps"] == 0  # A weekend alone is not verified evidence.
 
     crypto = data_quality(frame, "4h", "BTCUSD:BITSTAMP")
     assert crypto["unexpected_missing_bars"] is True

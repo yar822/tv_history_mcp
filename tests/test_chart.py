@@ -104,7 +104,7 @@ def test_chart_sessions_walk_back_across_weekend_and_report_coverage(tmp_path) -
     assert sessions.metadata["is_bar_complete"] is True
 
 
-def test_chart_uses_exchange_delay_to_exclude_latest_unconfirmed_bar(
+def test_chart_keeps_latest_unconfirmed_bar_excluded_after_delay(
     tmp_path, monkeypatch
 ) -> None:
     configured = replace(
@@ -133,7 +133,7 @@ def test_chart_uses_exchange_delay_to_exclude_latest_unconfirmed_bar(
         "ICEEUR:BRN1!", "1h", "2026-02-10T10:25:00Z", 1
     )
     assert isinstance(at_delay, ChartResult)
-    assert at_delay.metadata["bar_open"] == "2026-02-10T09:00:00Z"
+    assert at_delay.metadata["bar_open"] == "2026-02-10T08:00:00Z"
     assert at_delay.metadata["is_bar_complete"] is True
 
 

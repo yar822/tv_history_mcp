@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import re
 import tempfile
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
+from collections import OrderedDict
+from copy import deepcopy
 
 import pandas as pd
 
 from .config import Settings
 from .provider import split_asset
+from .metadata import compact_coverage, expand_coverage, prune_receipts
 
 
-_WRITE_LOCK = Lock()
+_WRITE_LOCK = RLock()
 _CONTROL_LOCK = Lock()
 SUPPORTED_TIMEFRAMES = ("1h", "4h", "1D", "1W")
 CONTROL_FIELDS = (
@@ -30,6 +34,74 @@ CONTROL_FIELDS = (
 class CsvStorage:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._coverage_cache = OrderedDict()
+
+    def _coverage_document(self, path):
+        """Private document, accessed under the storage lock; never returned directly."""
+        stamp = (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else None
+        cached = self._coverage_cache.get(path)
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, read_json(path, {}))
+            self._coverage_cache[path] = cached
+        self._coverage_cache.move_to_end(path)
+        while len(self._coverage_cache) > 16:
+            self._coverage_cache.popitem(last=False)
+        return cached[1]
+
+    def _write_coverage_document(self, path, document):
+        atomic_json(path, document)
+        self._coverage_cache[path] = ((path.stat().st_mtime_ns, path.stat().st_size), document)
+        self._coverage_cache.move_to_end(path)
+        while len(self._coverage_cache) > 16:
+            self._coverage_cache.popitem(last=False)
+
+    def read_coverage(self, asset):
+        with _WRITE_LOCK:
+            document = self._coverage_document(self.path_for(asset).parent / "coverage.json")
+            return expand_coverage({k: v for k, v in document.items() if k != "receipt_evidence"})
+
+    def save_coverage(self, asset, coverage):
+        with _WRITE_LOCK:
+            path = self.path_for(asset).parent / "coverage.json"
+            current = self._coverage_document(path)
+            document = compact_coverage({k: v for k, v in coverage.items() if k != "receipt_evidence"})
+            if "metadata_schema" in current:
+                document["metadata_schema"] = current["metadata_schema"]
+            if "receipt_evidence" in current:
+                document["receipt_evidence"] = current["receipt_evidence"]
+            if document != current:
+                self._write_coverage_document(path, deepcopy(document))
+
+    def migrate_metadata(self, asset):
+        with _WRITE_LOCK:
+            folder = self.path_for(asset).parent
+            legacy = [(tf, folder / f"{tf}.receipts.json") for tf in SUPPORTED_TIMEFRAMES]
+            legacy = [(tf, path) for tf, path in legacy if path.exists()]
+            if legacy:
+                path = folder / "coverage.json"
+                document = deepcopy(self._coverage_document(path))
+                evidence = document.setdefault("receipt_evidence", {})
+                for tf, old_path in legacy:
+                    receipts = evidence.setdefault(tf, {})
+                    for stamp, receipt in read_json(old_path, {}).items():
+                        previous = receipts.get(stamp)
+                        if previous is None or pd.Timestamp(receipt["request_started_at"]) > pd.Timestamp(previous["request_started_at"]):
+                            receipts[stamp] = receipt
+                self._write_coverage_document(path, document)
+                # Delete only after the complete consolidated document is durable.
+                for _, old_path in legacy:
+                    old_path.unlink()
+            self._migrate_revision_logs(folder)
+            path = folder / "coverage.json"
+            current = self._coverage_document(path)
+            calendar = read_json(folder / "calendar.json", {})
+            if calendar and current.get("metadata_schema") != 2:
+                document = compact_coverage(expand_coverage(current))
+                for tf, receipts in document.get("receipt_evidence", {}).items():
+                    prices = self.read(asset, tf)
+                    document["receipt_evidence"][tf] = prune_receipts(receipts, prices.index, calendar)
+                document["metadata_schema"] = 2
+                self._write_coverage_document(path, document)
 
     def path_for(self, asset: str, timeframe: str = "1h") -> Path:
         if timeframe not in SUPPORTED_TIMEFRAMES:
@@ -59,21 +131,102 @@ class CsvStorage:
         frame = pd.read_csv(path, parse_dates=["timestamp_utc"])
         frame = frame.set_index("timestamp_utc")
         frame.index = pd.DatetimeIndex(frame.index).tz_convert("UTC")
-        return frame[["open", "high", "low", "close", "volume"]].astype(float).sort_index()
+        result = frame[["open", "high", "low", "close", "volume"]].astype(float).sort_index()
+        with _WRITE_LOCK:
+            document = self._coverage_document(path.parent / "coverage.json")
+            receipts = document.get("receipt_evidence", {}).get(timeframe)
+            result.attrs["receipts"] = deepcopy(receipts) if receipts is not None else read_json(path.with_suffix(".receipts.json"), {})
+        return result
 
     def merge_and_write(
         self,
         asset: str,
         fresh: pd.DataFrame,
         timeframe: str = "1h",
+        received_after: pd.Timestamp | None = None,
     ) -> pd.DataFrame:
         with _WRITE_LOCK:
+            self.migrate_metadata(asset)
             current = self.read(asset, timeframe)
+            receipts = dict(current.attrs.get("receipts", {}))
+            # Pandas propagates attrs into every .loc/iterrows result. Full-batch
+            # refreshes must not deepcopy thousands of receipt records per row.
+            current.attrs = {}
+            path = self.path_for(asset, timeframe)
+            if received_after is not None:
+                observed = pd.Timestamp.now(tz="UTC").isoformat()
+                changes = []
+                for stamp in current.index.intersection(fresh.index):
+                    # Updating the previous tip, including its final refresh when
+                    # a successor arrives, is ordinary candle formation.
+                    if stamp == current.index[-1]:
+                        continue
+                    before, after = current.loc[stamp], fresh.loc[stamp]
+                    fields = [name for name in ("open", "high", "low", "close", "volume")
+                              if float(before[name]) != float(after[name])]
+                    if fields:
+                        changes.append({"asset": asset, "timeframe": timeframe,
+                                        "bar_open": stamp.isoformat(), "observed_at": observed,
+                                        "before": {k: float(before[k]) for k in fields},
+                                        "after": {k: float(after[k]) for k in fields}})
+                if changes:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with (path.parent / "revisions.jsonl").open("a", encoding="utf-8") as handle:
+                        for change in changes:
+                            handle.write(json.dumps(change) + "\n")
+                for stamp, row in fresh.iterrows():
+                    receipts[stamp.isoformat()] = {"request_started_at": received_after.isoformat(),
+                                                  "received_at": observed,
+                                                  "ohlcv": [float(row[k]) for k in ("open", "high", "low", "close", "volume")]}
+            # Frame attrs contain dictionaries with receipts; pandas concat must
+            # not compare these metadata payloads while merging rows.
+            current.attrs = {}
+            fresh = fresh.copy()
+            fresh.attrs = {}
             merged = pd.concat([current, fresh])
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
             validate_frame(merged)
             self._atomic_write(self.path_for(asset, timeframe), merged)
+            if received_after is not None:
+                receipts = prune_receipts(receipts, merged.index, read_json(path.parent / "calendar.json", {}))
+                coverage_path = path.parent / "coverage.json"
+                document = dict(self._coverage_document(coverage_path))
+                evidence = dict(document.get("receipt_evidence", {}))
+                evidence[timeframe] = deepcopy(receipts)
+                document["receipt_evidence"] = evidence
+                self._write_coverage_document(coverage_path, document)
+            merged.attrs["receipts"] = receipts
             return merged
+
+    @staticmethod
+    def _migrate_revision_logs(folder: Path) -> None:
+        """Consolidate legacy logs before removing them; caller holds write lock."""
+        legacy = [folder / f"{tf}.revisions.jsonl" for tf in SUPPORTED_TIMEFRAMES]
+        legacy = [path for path in legacy if path.exists()]
+        if not legacy:
+            return
+        target = folder / "revisions.jsonl"
+        records = {}
+        for path in ([target] if target.exists() else []) + legacy:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if path != target:
+                    record.setdefault("timeframe", path.name.split(".")[0])
+                records[json.dumps(record, sort_keys=True)] = record
+        fd, name = tempfile.mkstemp(prefix="revisions-", suffix=".tmp", dir=folder)
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            temporary.write_text("".join(json.dumps(record) + "\n" for record in
+                                 sorted(records.values(), key=lambda r: r.get("observed_at", ""))),
+                                 encoding="utf-8")
+            os.replace(temporary, target)
+            for path in legacy:
+                path.unlink()
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _atomic_write(path: Path, frame: pd.DataFrame) -> None:
@@ -191,6 +344,24 @@ def empty_frame() -> pd.DataFrame:
     frame = pd.DataFrame(columns=["open", "high", "low", "close", "volume"], dtype=float)
     frame.index = pd.DatetimeIndex([], tz="UTC", name="timestamp_utc")
     return frame
+
+
+def read_json(path: Path, default):
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def atomic_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=path.stem, suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    temp = Path(name)
+    try:
+        temp.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def validate_frame(frame: pd.DataFrame) -> None:

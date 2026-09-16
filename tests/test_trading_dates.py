@@ -137,7 +137,7 @@ def test_service_preserves_raw_csv_and_excludes_monday_from_loop_context(tmp_pat
     raw = frame(["2026-09-04T03:00Z", "2026-09-05T06:00Z", "2026-09-08T03:00Z"])
     storage.merge_and_write("RUS:MX1!", raw, "1D")
     before = storage.path_for("RUS:MX1!", "1D").read_bytes()
-    provider = FakeProvider([])
+    provider = FakeProvider([raw])
     sync = HistorySynchronizer(config, provider, storage)
     service = AssetBarsService(config, sync)
     response = service.get_bars("RUS:MX1!", "1D", "2026-09-07T00:00Z", count=2)
@@ -149,7 +149,8 @@ def test_service_preserves_raw_csv_and_excludes_monday_from_loop_context(tmp_pat
     retained = [bar for bar in response["bars"] if pd.Timestamp(bar["t"]) + pd.Timedelta(days=1) <= anchor]
     assert [bar["t"] for bar in retained] == ["2026-09-04T00:00:00Z"]
     assert storage.path_for("RUS:MX1!", "1D").read_bytes() == before
-    assert provider.requests == []
+    # The unverified gap gets one full history check, preserving native rows.
+    assert provider.requests == [("RUS:MX1!", "1D", 5000)]
 
 
 def test_refresh_still_merges_using_raw_timestamps(tmp_path):
@@ -199,16 +200,16 @@ def test_setting_routes_new_symbol_and_disables_previous_symbols(tmp_path):
     raw = frame(["2026-08-29T06:00Z"])
     cutoff = pd.Timestamp("2026-09-01T00:00Z")
     assert sync._served_view("RUS:TEST", "1D", raw, cutoff).index[0] == pd.Timestamp("2026-08-31", tz="UTC")
-    assert sync._served_view("RUS:MX1!", "1D", raw, cutoff) is raw
+    pd.testing.assert_frame_equal(sync._served_view("RUS:MX1!", "1D", raw, cutoff), raw)
     assert sync._served_view("RUS:TEST", "1W", raw, cutoff).index[0] == pd.Timestamp("2026-08-31", tz="UTC")
-    assert sync._served_view("RUS:TEST", "4h", raw, cutoff) is raw
+    pd.testing.assert_frame_equal(sync._served_view("RUS:TEST", "4h", raw, cutoff), raw)
 
 
 def test_ydex_separate_weekend_daily_bars_are_not_routed_by_default(tmp_path):
     configured = make_settings(tmp_path)
     sync = HistorySynchronizer(configured, FakeProvider([]), CsvStorage(configured))
     raw = frame(["2026-09-05T07:00Z", "2026-09-06T07:00Z", "2026-09-07T04:00Z"])
-    assert sync._served_view("RUS:YDEX", "1D", raw, pd.Timestamp("2026-09-07T12:00Z")) is raw
+    pd.testing.assert_frame_equal(sync._served_view("RUS:YDEX", "1D", raw, pd.Timestamp("2026-09-07T12:00Z")), raw)
     with pytest.raises(ValueError, match="Unrecognized RUS daily session timestamp"):
         standard_date(raw.index[0])
 
@@ -323,3 +324,10 @@ def test_shortened_session_cannot_use_missing_or_post_boundary_evidence(defect):
     result = normalize_daily(daily, four, pd.Timestamp("2025-11-10", tz="UTC"), hourly=hourly)
     assert result.index[0] == pd.Timestamp("2025-11-04", tz="UTC")
     assert result.iloc[0].timestamp_basis == "standard_session_rule"
+
+
+import pytest as _pytest
+
+@_pytest.fixture(autouse=True)
+def existing_partial_cache_without_network_bootstrap(monkeypatch):
+    monkeypatch.setattr("tv_history.sync.HistorySynchronizer._initialize", lambda *args: False)
