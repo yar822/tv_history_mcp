@@ -109,7 +109,7 @@ def test_ambiguous_historical_mapping_never_silently_merges_rows():
     assert len(result) == 2
     assert list(result.index) == [pd.Timestamp("2021-02-22", tz="UTC")] * 2
     assert result.timestamp_ambiguous.all()
-    assert result.attrs["timestamp_normalization"]["ambiguous_rows"] == 2
+    assert "timestamp_normalization" not in result.attrs
     assert result.source_timestamp.is_unique
 
 
@@ -256,7 +256,8 @@ def test_weekly_cutoff_and_raw_storage_preserved(tmp_path):
     assert [b["is_bar_complete"] for b in response["bars"]] == [True, True, False]
     kept = [b for b in response["bars"] if pd.Timestamp(b["t"]) + pd.Timedelta(days=7) <= pd.Timestamp("2026-08-31T00:00Z")]
     assert kept[-1]["t"] == "2026-08-24T00:00:00Z"
-    assert response["timestamp_normalization"]["convention"] == "rus_weekly_trading_week_v1"
+    assert "timestamp_normalization" not in response
+    assert all("timestamp_evidence" in bar for bar in response["bars"])
     assert storage.path_for("RUS:MX1!", "1W").read_bytes() == before
 
 

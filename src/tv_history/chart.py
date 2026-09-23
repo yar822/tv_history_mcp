@@ -15,7 +15,6 @@ from .resample import bar_status
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
 from .windows import select_sessions, sessions_covered
-from .coverage import window_coverage
 
 
 MAX_DAYS = 365
@@ -60,7 +59,7 @@ class AssetChartService:
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at,
                 required_start=(requested_at - pd.Timedelta(days=requested_days)) if requested_days else None,
-                sessions=requested_sessions,
+                sessions=requested_sessions, include_coverage_metadata=False,
             )
             evaluated_at = min(requested_at, current_utc_time())
             opened = source.loc[source.index <= evaluated_at]
@@ -96,10 +95,6 @@ class AssetChartService:
             metadata = {
                 "asset": normalized_asset,
                 "completion_calendar": calendar_metadata(source),
-                "history_coverage": window_coverage(source, evaluated_at,
-                    bars.index.min() if requested_sessions else window_start, sessions=requested_sessions),
-                **({"timestamp_normalization": source.attrs["timestamp_normalization"]}
-                   if "timestamp_normalization" in source.attrs else {}),
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (bars.index.max() + duration).isoformat(),

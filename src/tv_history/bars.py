@@ -43,7 +43,7 @@ class AssetBarsService:
         try:
             source, _refresh = self.synchronizer.ensure_available(
                 normalized_asset, timeframe, requested_at, count=parsed_count if parsed_sessions is None else None,
-                sessions=parsed_sessions,
+                sessions=parsed_sessions, include_coverage_metadata=False,
             )
             evaluated_at = min(requested_at, current_utc_time())
             # Selection and indicators need prices, not copies of full-history
@@ -74,9 +74,6 @@ class AssetBarsService:
             return {
                 "asset": normalized_asset,
                 "completion_calendar": calendar_metadata(source),
-                "history_coverage": coverage,
-                **({"timestamp_normalization": source.attrs["timestamp_normalization"]}
-                   if "timestamp_normalization" in source.attrs else {}),
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
                 "effective_bar_close": (

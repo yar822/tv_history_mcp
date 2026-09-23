@@ -26,6 +26,24 @@ def test_weekly_profile_normalizes_daily_once_and_preserves_metadata(monkeypatch
     assert calls == [2]
 
 
+@pytest.mark.parametrize('timeframe', ['1D', '1W'])
+def test_normalization_keeps_provenance_without_summary_aggregation(monkeypatch, timeframe):
+    daily = frame(['2026-03-02T00:00Z', '2026-03-09T00:00Z'])
+    original = daily.copy(deep=True)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('normalization must not aggregate diagnostic counts')
+
+    monkeypatch.setattr(pd.Series, 'value_counts', unexpected)
+    result = served_profile(daily, daily, daily.iloc[:0], daily.iloc[:0],
+                            pd.Timestamp('2026-03-10T00:00Z'), timeframe, 'utc_calendar')
+    pd.testing.assert_frame_equal(result[list(daily.columns)], original)
+    pd.testing.assert_frame_equal(daily, original)
+    assert 'timestamp_normalization' not in result.attrs
+    assert {'source_timestamp', 'timestamp_basis', 'timestamp_evidence',
+            'timestamp_ambiguous'} <= set(result.columns)
+
+
 @pytest.mark.parametrize('profile,raw,date', [
     ('cme_overnight','2026-03-01T23:00Z','2026-03-02'),
     ('cme_overnight','2026-03-08T22:00Z','2026-03-09'),
@@ -54,7 +72,7 @@ def test_legacy_sunday_weekly_evening_uses_next_monday_without_daily_backup():
     result = served_profile(weekly, empty, empty, empty, pd.Timestamp('1983-08-09T00:00Z'), '1W', 'cme_overnight')
     assert list(result.index) == [pd.Timestamp('1983-08-01T00:00Z'), pd.Timestamp('1983-08-08T00:00Z')]
     assert len(result) == len(weekly)
-    assert result.attrs['timestamp_normalization']['unrecognized_source_timestamps'] == []
+    assert 'timestamp_normalization' not in result.attrs
 
 
 def test_unverified_holiday_bar_retains_standard_date_fallback():
@@ -62,7 +80,7 @@ def test_unverified_holiday_bar_retains_standard_date_fallback():
     empty = daily.iloc[:0]
     result = served_profile(daily, daily, empty, empty, pd.Timestamp('2026-07-06T00:00Z'), '1D', 'cme_overnight')
     assert list(result.index) == [pd.Timestamp('2026-07-03T00:00Z')]
-    assert result.attrs['timestamp_normalization']['unverified_rows'] == 1
+    assert result.iloc[0].timestamp_basis == 'standard_session_rule'
 
 
 def test_verified_overnight_bar_preserves_prices_and_moves_date():
@@ -90,14 +108,14 @@ def test_bitcoin_calendar_does_not_require_intraday_cache():
     assert result.index.equals(daily.index)
 
 
-def test_weekly_ohl_mismatch_is_reported_and_preserved():
+def test_weekly_ohl_mismatch_is_preserved():
     daily = frame(['2026-03-02T00:00Z','2026-03-09T00:00Z'])
     weekly = daily.copy()
     weekly.iloc[0, 1] = 99
     result = served_profile(weekly, daily, daily.iloc[:0], daily.iloc[:0], pd.Timestamp('2026-03-09T00:00Z'), '1W', 'utc_calendar')
     assert len(result) == 2
     assert result.iloc[0].high == 99
-    assert result.attrs['timestamp_normalization']['unverified_rows'] == 2
+    assert 'timestamp_normalization' not in result.attrs
 
 
 @pytest.mark.parametrize('defect', [None, 'missing_bar', 'bad_high', 'daytime_start'])
@@ -126,7 +144,7 @@ def test_cme_holiday_overnight_tail_uses_ohl_and_preserves_volume(defect, profil
         assert weekly.index[0] + pd.Timedelta(days=7) > cutoff
 
 
-def test_service_profile_retains_fallback_bar_and_reports_it(tmp_path):
+def test_service_profile_retains_fallback_bar_and_provenance(tmp_path):
     from dataclasses import replace
     from test_analysis import settings
     from test_sync import FakeProvider
@@ -140,7 +158,8 @@ def test_service_profile_retains_fallback_bar_and_reports_it(tmp_path):
         'COMEX:GC1!', '1D', '2026-07-06T00:00Z', count=3)
     assert 'error' not in response
     assert response['bars'][0]['t'] == '2026-07-03T00:00:00Z'
-    assert response['timestamp_normalization']['unverified_rows'] == 1
+    assert 'timestamp_normalization' not in response
+    assert response['bars'][0]['timestamp_basis'] == 'standard_session_rule'
 
 
 import pytest as _pytest

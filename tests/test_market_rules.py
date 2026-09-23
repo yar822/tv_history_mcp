@@ -57,7 +57,7 @@ def test_default_normalizes_and_null_exception_preserves_native_labels(tmp_path,
         assert "timestamp_normalization" not in result.attrs
     for asset in ("RUS:MX1!", "RUS:SI1!", "RUS:NEW1!"):
         result = sync._normalize_view(asset, tf, raw, cutoff)
-        assert result.attrs["timestamp_normalization"]["profile"] == "moex_futures"
+        assert "timestamp_normalization" not in result.attrs
         expected = "2026-03-03T00:00Z" if tf == "1D" else "2026-03-02T00:00Z"
         assert result.index[0] == pd.Timestamp(expected)
         assert result.iloc[0].source_timestamp == "2026-03-02T15:00:00Z"

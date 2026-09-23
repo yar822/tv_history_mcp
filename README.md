@@ -289,7 +289,7 @@ one receipt per timeframe. Historical-cutoff completion behavior is preserved. C
 evidence under the storage write lock. Storage keeps at most 16 parsed coverage
 documents in memory, invalidated by file size/modification time, to avoid parsing
 all four timeframe receipt maps on every read. Receipt evidence is internal and
-does not appear in the public `history_coverage` response.
+does not appear in MCP responses.
 
 Bars add `completion_reason` and nullable `completion_boundary`; all endpoints
 add `completion_calendar` metadata. Reasons include `successor_received`,
@@ -369,8 +369,8 @@ a successor always keeps the standard assumption.
 
 `asset_bars` includes `source_timestamp`, `timestamp_basis`,
 `timestamp_evidence`, and `timestamp_ambiguous` on normalized daily bars.
-Response metadata (`timestamp_normalization`, or `daily_timestamp_normalization`
-in analysis) describes the convention and evidence counts. Charts and analysis
+Normalization retains per-bar evidence without building history-wide diagnostic
+summaries. Charts and analysis
 use the same normalized view. Original source opens are checked before exposing
 rows at a historical cutoff, so moving a morning label to midnight does not make
 the bar available before its source session opened.
@@ -454,10 +454,10 @@ holes, while ambiguous daily/weekly ownership remains uncertain. Native daily or
 weekly candles can legitimately span holiday tails. No synthetic candles are
 inserted. Provider history limits may leave old gaps unresolved.
 
-All endpoints expose `history_coverage` with `no_known_gaps`, `uncertain`, or
-`incomplete`, plus unresolved intervals and available range. This is evidence of
-coverage, not a guarantee the provider itself has a perfect history. Bar requests
-can return partial data with this metadata. Analysis returns
+Internal coverage checks track `no_known_gaps`, `uncertain`, or `incomplete`,
+plus unresolved intervals and available range. These metadata blocks are omitted
+from MCP responses. Coverage evidence is not a guarantee the provider itself has
+a perfect history. Bar requests can return partial data. Analysis returns
 `INSUFFICIENT_HISTORY_COVERAGE` if confirmed missing/unavailable data affects its
 calculation history, including its daily auxiliary input. A stale cache without
 proof of missing trading bars remains uncertain rather than being called covered.
@@ -505,19 +505,26 @@ Daily output `t` is trading-date midnight UTC; weekly output `t` is Monday midni
 `source_timestamp` preserves the actual source stamp. Intraday times and all raw
 storage/prices remain unchanged. Intraday evidence verifies/corrects daily
 ownership; absent or mismatching evidence retains the profile's standard date.
-Weekly verification checks contributing daily ownership, dates inside the
-labelled week and aggregate O/H/L; failed checks are reported, not excluded.
+Weekly labels use the opening daily mapping when opening prices match, with
+standard-date fallback otherwise. Diagnostic-only weekly aggregate checks have
+been removed; they previously populated summary counts without changing bars.
 Daily settlement closes/weekly volume revisions are not forced to match. Bitcoin
 uses its UTC calendar convention without requiring an intraday cache for daily
-labels; weekly validation still requires daily evidence.
+labels; weekly mapping can use the opening daily evidence.
 
 Operator-selected policy: retain all eligible bars. Missing intraday history,
 mismatching prices or no successor does not remove a bar. Normal evening opens
 advance to the next weekday; normal morning opens retain the date. Matching
 intraday evidence overrides this fallback. Duplicate labels are preserved and
-flagged, never merged. `unverified_rows` and `unverified_source_timestamps` report
-verification failures over available history at the cutoff, not just the tail.
-Unknown opening patterns are explicitly listed in `unrecognized_source_timestamps`.
+flagged, never merged. History-wide timestamp diagnostic lists, counts, and
+verification-only passes are no longer constructed. Per-bar timestamp basis,
+evidence, source timestamps, and ambiguity flags remain available.
+MCP responses omit `timestamp_normalization`, `daily_timestamp_normalization`,
+`history_coverage`, and `daily_history_coverage`, including coverage error details,
+from both text and structured output. Tools skip the synchronizer's optional
+returned coverage report, and charts skip their output-only coverage report.
+Coverage repair decisions, analysis eligibility checks, and bar data-quality
+checks remain active; error codes/messages and per-bar provenance are retained.
 The loop ignores ambiguity/completeness flags: retaining fallback bars means
 unresolved holiday ownership can still cause future-data leakage. This policy
 preserves history; it is not a universal all-history causality guarantee.

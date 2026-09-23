@@ -3,6 +3,38 @@
 Meaningful changes to tv-history MCP, newest first. Entries describe implemented
 behavior; dates are work dates rather than published release versions.
 
+## 2026-09-17
+
+### Omit internal metadata from MCP responses
+
+- All three tools now omit `timestamp_normalization`,
+  `daily_timestamp_normalization`, `history_coverage`, and
+  `daily_history_coverage` from text and structured responses, including nested
+  error details. Previously these blocks exposed large timestamp and gap lists.
+- Filtering occurs at serialization without mutating internal metadata. Coverage
+  checks, repairs, per-bar provenance, error codes/messages, and chart images
+  remain unchanged. Updated README to reflect the public response contract.
+- Validation: 113 focused automated tests passed across response serialization,
+  bars, charts, analysis, coverage, timestamp profiles, and provider metadata.
+  No cache-copy or live MCP validation was performed. Restart MCP to activate.
+
+### Stop constructing unused diagnostics during tool requests
+
+- Removed timestamp summary lists/counts and the profile verification passes
+  that only populated those summaries. Previously the response filter hid them
+  after construction. Daily/weekly label mapping, OHLCV, source timestamps,
+  evidence, and ambiguity flags remain intact.
+- Services no longer attach discarded metadata. Tool calls skip the optional
+  synchronizer coverage report, and charts skip their output-only coverage
+  calculation. Repair eligibility, analysis coverage gates, and bars' missing-data
+  checks remain active; internal callers can still request coverage reports.
+- Validation: the initial full suite passed 276 tests and found four obsolete
+  metadata assertions, which were updated. The focused rerun passed 142 tests;
+  two new repair cases then passed after correcting a frequency-only assertion
+  for CSV-loaded indexes. Tests cover preserved provenance and repair behavior,
+  plus skipping redundant coverage work. No cache-copy/live MCP validation or
+  latency benchmark was performed. Restart MCP to activate.
+
 ## 2026-09-15
 
 ### Saved provider delay metadata

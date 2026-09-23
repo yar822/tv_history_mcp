@@ -245,6 +245,42 @@ def test_coverage_repair_rebuilds_view_with_new_prices_and_receipts(tmp_path):
     assert source.attrs["history_coverage"] == sync.coverage[ASSET]["1h"]
 
 
+@pytest.mark.parametrize("include_coverage_metadata", [False, True])
+def test_coverage_diagnostics_do_not_change_repairs(tmp_path, include_coverage_metadata):
+    fresh = frame("2026-08-19T06:00Z", [100.] * 48)
+    provider = Provider([fresh])
+    _, storage, sync = seeded(tmp_path, fresh.iloc[[0, -1]], provider)
+    for _ in range(2):
+        view, meta = sync.ensure_available(
+            ASSET, "1h", fresh.index[-1],
+            include_coverage_metadata=include_coverage_metadata,
+        )
+        assert ("history_coverage" in meta) is include_coverage_metadata
+        pd.testing.assert_frame_equal(view[list(fresh.columns)], fresh, check_freq=False)
+        assert window_coverage(view, fresh.index[-1])["status"] == "no_known_gaps"
+    assert provider.calls == [(ASSET, "1h", 5000)]
+    assert len(storage.read(ASSET, "1h")) == len(fresh)
+
+
+def test_skipping_coverage_metadata_avoids_extra_window_check(tmp_path, monkeypatch):
+    import tv_history.sync as sync_module
+    prices = frame("2026-08-19T06:00Z", [100.] * 48)
+    _, _, sync = seeded(tmp_path, prices, Provider([]))
+    calls = []
+    original = sync_module.window_coverage
+
+    def tracked(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sync_module, "window_coverage", tracked)
+    sync.ensure_available(ASSET, "1h", prices.index[-1], include_coverage_metadata=False)
+    assert len(calls) == 1  # Repair eligibility still runs.
+    calls.clear()
+    sync.ensure_available(ASSET, "1h", prices.index[-1], include_coverage_metadata=True)
+    assert len(calls) == 2
+
+
 def test_cross_timeframe_evidence_confirms_gap_and_blocks_analysis(tmp_path):
     hourly = pd.concat([frame("2026-08-19T06:00Z", [100.]), frame("2026-08-28T17:00Z", [100.])])
     provider = Provider([hourly])

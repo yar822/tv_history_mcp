@@ -13,9 +13,6 @@ from .provider import split_asset
 from .config import DEFAULT_RUS_DAILY_TRADING_DATE_ASSETS
 
 
-CONVENTION = "rus_daily_trading_date_v1"
-
-
 def uses_trading_dates(
     asset: str,
     timeframe: str,
@@ -180,20 +177,6 @@ def normalize_daily(
     normalized["timestamp_ambiguous"] = normalized.index.duplicated(keep=False)
     # A midnight label must not expose a same-day morning bar before it opened.
     normalized = normalized.loc[source.index <= evaluated_at].copy()
-    normalized.attrs["timestamp_normalization"] = {
-        "convention": CONVENTION,
-        "calendar_used": False,
-        "raw_storage_preserved": True,
-        "four_hour_source": "local_cache_only",
-        "session_end_hourly_source": "local_cache_only",
-        "standard_dates_are_assumptions": True,
-        "ambiguous_rows": int(normalized["timestamp_ambiguous"].sum()),
-        "ambiguous_source_timestamps": normalized.loc[
-            normalized["timestamp_ambiguous"], "source_timestamp"
-        ].tolist(),
-        "basis_counts": normalized["timestamp_basis"].value_counts().to_dict(),
-        "evidence_counts": normalized["timestamp_evidence"].value_counts().to_dict(),
-    }
     return normalized
 
 
@@ -251,17 +234,4 @@ def normalize_weekly(
         raise ValueError("Ambiguous RUS trading weeks: normalization would reorder bars")
     normalized["timestamp_ambiguous"] = normalized.index.duplicated(keep=False) | pd.array(ambiguous, dtype=bool)
     normalized = normalized.loc[source.index <= evaluated_at].copy()
-    normalized.attrs["timestamp_normalization"] = {
-        "convention": "rus_weekly_trading_week_v1",
-        "calendar_used": False,
-        "raw_storage_preserved": True,
-        "daily_and_four_hour_source": "local_cache_only",
-        "standard_dates_are_assumptions": True,
-        "ambiguous_rows": int(normalized["timestamp_ambiguous"].sum()),
-        "ambiguous_source_timestamps": normalized.loc[
-            normalized["timestamp_ambiguous"], "source_timestamp"
-        ].tolist(),
-        "basis_counts": normalized["timestamp_basis"].value_counts().to_dict(),
-        "evidence_counts": normalized["timestamp_evidence"].value_counts().to_dict(),
-    }
     return normalized

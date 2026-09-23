@@ -35,14 +35,13 @@ class AssetAnalysisService:
             if response_version != "execution":
                 raise ValueError("response_version must be execution")
             source, _refresh = self.synchronizer.ensure_available(
-                normalized_asset, timeframe, requested_at
+                normalized_asset, timeframe, requested_at, include_coverage_metadata=False
             )
             evaluated_at = min(requested_at, current_utc_time())
             coverage = window_coverage(source, evaluated_at)
             if coverage["status"] == "incomplete":
                 return error_response("INSUFFICIENT_HISTORY_COVERAGE",
-                                      "Required analysis history contains missing or unavailable bars.",
-                                      history_coverage=coverage)
+                                      "Required analysis history contains missing or unavailable bars.")
             opened = source.loc[source.index <= evaluated_at]
             details = completion_details(opened, duration, evaluated_at,
                                          finalization_delay(self.settings, normalized_asset))
@@ -76,17 +75,14 @@ class AssetAnalysisService:
 
             calculated = calculate_indicators(closed, self.settings.indicators)
             daily_source = closed
-            daily_normalization = source.attrs.get("timestamp_normalization") if timeframe == "1D" else None
             if timeframe != "1D":
                 daily_source, _daily_refresh = self.synchronizer.ensure_available(
-                    normalized_asset, "1D", requested_at
+                    normalized_asset, "1D", requested_at, include_coverage_metadata=False
                 )
                 daily_coverage = window_coverage(daily_source, evaluated_at)
-                daily_normalization = daily_source.attrs.get("timestamp_normalization")
                 if daily_coverage["status"] == "incomplete":
                     return error_response("INSUFFICIENT_HISTORY_COVERAGE",
-                                          "Required daily analysis history contains missing or unavailable bars.",
-                                          history_coverage=daily_coverage)
+                                          "Required daily analysis history contains missing or unavailable bars.")
                 daily_opened = daily_source.loc[daily_source.index <= evaluated_at]
                 daily_flags = finality_flags(daily_opened, timeframe_duration("1D"), evaluated_at,
                                             finalization_delay(self.settings, normalized_asset))
@@ -112,16 +108,9 @@ class AssetAnalysisService:
             from .execution import data_quality
             result["data_quality"] = data_quality(closed, timeframe, normalized_asset,
                                                   source.attrs.get("completion_context", {}).get("calendar"))
-            result["history_coverage"] = coverage
-            if timeframe != "1D":
-                result["daily_history_coverage"] = daily_coverage
             shown_details = details if live_request else details.loc[details["is_bar_complete"]]
             result["completion_reason"] = shown_details.iloc[-1]["completion_reason"]
             result["completion_boundary"] = shown_details.iloc[-1]["completion_boundary"]
-            if "timestamp_normalization" in source.attrs:
-                result["timestamp_normalization"] = source.attrs["timestamp_normalization"]
-            if daily_normalization is not None:
-                result["daily_timestamp_normalization"] = daily_normalization
             return result
         except ValueError as exc:
             message = str(exc)

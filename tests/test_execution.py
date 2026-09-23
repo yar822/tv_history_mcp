@@ -309,7 +309,7 @@ def test_execution_unsupported_timeframe_is_structured_error(tmp_path) -> None:
 def test_execution_asset_not_found_is_structured_error(tmp_path) -> None:
     class MissingAssetSynchronizer:
         def ensure_available(
-            self, asset: str, timeframe: str, requested_at: pd.Timestamp
+            self, asset: str, timeframe: str, requested_at: pd.Timestamp, **kwargs
         ):
             raise RuntimeError(f"tvDatafeed returned no data for {asset}")
 
@@ -348,7 +348,7 @@ def test_direct_daily_source_excludes_rows_after_request(tmp_path) -> None:
             self.direct_daily = direct_daily
 
         def ensure_available(
-            self, asset: str, timeframe: str, requested: pd.Timestamp
+            self, asset: str, timeframe: str, requested: pd.Timestamp, **kwargs
         ):
             assert timeframe == "1D"
             return self.direct_daily, {"refreshed": False}
@@ -579,7 +579,7 @@ def test_weekly_execution_uses_direct_weekly_and_daily_sources(tmp_path) -> None
 
     class DirectWeeklySynchronizer:
         def ensure_available(
-            self, asset: str, timeframe: str, requested: pd.Timestamp
+            self, asset: str, timeframe: str, requested: pd.Timestamp, **kwargs
         ):
             return (weekly if timeframe == "1W" else daily), {"refreshed": False}
 

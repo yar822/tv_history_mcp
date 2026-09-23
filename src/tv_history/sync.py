@@ -306,15 +306,17 @@ class HistorySynchronizer:
 
     def ensure_available(
         self, asset: str, timeframe: str, requested_at: pd.Timestamp,
-        *, count=None, sessions=None, required_start=None,
+        *, count=None, sessions=None, required_start=None, include_coverage_metadata=True,
     ) -> tuple[pd.DataFrame, dict]:
+        """Load/repair history; optionally return coverage diagnostics for internal callers."""
         # One initializer/refresh per ticker at a time. Provider already serializes
         # websocket downloads; this also prevents older responses overwriting newer ones.
         with self._lock:
             return self._ensure_available(self._canonical(asset), timeframe, requested_at,
-                                          count=count, sessions=sessions, required_start=required_start)
+                                          count=count, sessions=sessions, required_start=required_start,
+                                          include_coverage_metadata=include_coverage_metadata)
 
-    def _ensure_available(self, asset, timeframe, requested_at, *, count=None, sessions=None, required_start=None):
+    def _ensure_available(self, asset, timeframe, requested_at, *, count=None, sessions=None, required_start=None, include_coverage_metadata=True):
         if timeframe not in TIMEFRAME_DURATIONS:
             raise ValueError("timeframe must be one of: 1h, 4h, 1D, 1W")
         initialized_now = self._initialize(asset, requested_at)
@@ -390,7 +392,9 @@ class HistorySynchronizer:
             view = self._served_view(asset, timeframe, stored, requested_at)
         else:
             view.attrs["history_coverage"] = deepcopy(state)
-        meta["history_coverage"] = window_coverage(view, cutoff, start, count=count, sessions=sessions)
+        # Tool callers retain required checks but omit this diagnostic-only report.
+        if include_coverage_metadata:
+            meta["history_coverage"] = window_coverage(view, cutoff, start, count=count, sessions=sessions)
         return view, meta
 
     def _fetch(self, asset, timeframe, requested_at, request_bars):

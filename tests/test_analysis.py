@@ -252,7 +252,7 @@ def test_short_term_efficiency_is_null_for_flat_path() -> None:
 
 def test_analysis_error_shape_is_identical_and_dst_error_is_not_retryable(tmp_path) -> None:
     class AmbiguousSynchronizer:
-        def ensure_available(self, asset: str, timeframe: str, requested_at: pd.Timestamp):
+        def ensure_available(self, asset: str, timeframe: str, requested_at: pd.Timestamp, **kwargs):
             raise ValueError("2013-10-27 03:00:00 is an ambiguous time and cannot be inferred")
 
     service = AssetAnalysisService(settings(tmp_path), AmbiguousSynchronizer())
