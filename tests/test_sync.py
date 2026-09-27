@@ -204,7 +204,6 @@ def test_provider_sends_exchange_symbol_input_in_tvdatafeed_argument_order(tmp_p
         def get_hist(self, **kwargs):
             self.arguments = kwargs
             result = frame("2026-01-01", [10.0])
-            result.index = result.index.tz_localize(None)
             return result
 
     provider = TvDatafeedProvider(make_settings(tmp_path))
@@ -217,7 +216,7 @@ def test_provider_sends_exchange_symbol_input_in_tvdatafeed_argument_order(tmp_p
     assert provider._client.arguments["n_bars"] == 25
 
 
-def test_provider_localizes_single_dst_fold_hour_without_inference_error(tmp_path) -> None:
+def test_provider_rejects_naive_timestamps_instead_of_guessing_timezone(tmp_path) -> None:
     class FoldHourClient:
         def get_hist(self, **kwargs):
             index = pd.DatetimeIndex(["2013-10-27 03:00:00"])
@@ -230,9 +229,8 @@ def test_provider_localizes_single_dst_fold_hour_without_inference_error(tmp_pat
     provider = TvDatafeedProvider(configured)
     provider._client = FoldHourClient()
 
-    result = provider.get_history("BITSTAMP:BTCUSD", "1D", 5000)
-
-    assert result.index[0] == pd.Timestamp("2013-10-27T01:00:00Z")
+    with pytest.raises(RuntimeError, match="timezone-naive"):
+        provider.get_history("BITSTAMP:BTCUSD", "1D", 5000)
 
 
 def test_each_timeframe_is_downloaded_cached_and_stored_separately(tmp_path) -> None:

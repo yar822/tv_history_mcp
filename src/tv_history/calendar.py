@@ -12,6 +12,7 @@ import json
 import pandas as pd
 
 from .market_rules import resolve_market_rule
+from .trading_weeks import build_trading_weeks
 
 
 HOUR = pd.Timedelta(hours=1)
@@ -50,6 +51,7 @@ def learn_calendar(asset, frames, settings, now):
               "requested_sessions": settings.calendar_sessions, "eligible_sessions": 0,
               "rules": {}, "session_templates": {}, "status": "insufficient_history",
               "boundary_overrides": (settings.calendar_boundary_overrides or {}).get(asset, {})}
+    result["trading_weeks"] = build_trading_weeks(asset, frames, settings, now)
     hourly = frames["1h"]
     if not zone or hourly.empty:
         return finish(result)

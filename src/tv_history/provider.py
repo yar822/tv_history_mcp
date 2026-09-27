@@ -60,11 +60,11 @@ class TvDatafeedProvider:
 
     def _get_client(self):
         if self._client is None:
-            from tvDatafeed import TvDatafeed
+            from .provider_client import UtcTvDatafeed
 
             username = os.environ.get("TRADINGVIEW_USERNAME") or None
             password = os.environ.get("TRADINGVIEW_PASSWORD") or None
-            client = TvDatafeed(username=username, password=password)
+            client = UtcTvDatafeed(username=username, password=password)
             token_file = Path(__file__).resolve().parents[2] / "_token.txt"
             if token_file.is_file():
                 token = token_file.read_text(encoding="utf-8-sig").strip()
@@ -94,6 +94,13 @@ class TvDatafeedProvider:
         with self._download_lock:
             return collect_metadata(f"{exchange}:{symbol}", self._get_client().token)
 
+    def get_rollovers(self, asset: str) -> dict:
+        from .provider_rollovers import collect_rollovers
+
+        symbol, exchange = split_asset(asset)
+        with self._download_lock:
+            return collect_rollovers(f"{exchange}:{symbol}", self._get_client().token)
+
     def _get_history(self, asset: str, n_bars: int, interval) -> pd.DataFrame:
 
         symbol, exchange = split_asset(asset)
@@ -110,23 +117,7 @@ class TvDatafeedProvider:
         result = frame.copy()
         index = pd.DatetimeIndex(result.index)
         if index.tz is None:
-            try:
-                index = index.tz_localize(
-                    self.settings.provider_naive_timezone,
-                    ambiguous="infer",
-                    nonexistent="shift_forward",
-                )
-            except ValueError as exc:
-                if "ambiguous" not in str(exc).lower() and "infer dst" not in str(exc).lower():
-                    raise
-                # A lone fold-hour timestamp cannot be inferred. Prefer standard
-                # time; if both occurrences exist, preserve their chronological order.
-                ambiguous = index.duplicated(keep="last")
-                index = index.tz_localize(
-                    self.settings.provider_naive_timezone,
-                    ambiguous=ambiguous,
-                    nonexistent="shift_forward",
-                )
+            raise RuntimeError("Provider returned timezone-naive timestamps; UTC decoder required")
         result.index = index.tz_convert("UTC")
         result.index.name = "timestamp_utc"
         return result[["open", "high", "low", "close", "volume"]].astype(float)

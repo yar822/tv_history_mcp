@@ -1,6 +1,5 @@
 storage:
   root: data
-  provider_naive_timezone: Europe/Istanbul
 
 market_rules:
   exchanges:

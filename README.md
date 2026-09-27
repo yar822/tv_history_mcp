@@ -12,7 +12,22 @@ timeframes (1h, 4h, 1D, 1W) before answering, independent of response count.
 
 ## Install and run
 
+Bar timestamps are decoded directly from TradingView Unix timestamps into
+timezone-aware UTC. Changing the PC timezone requires no configuration change
+or restart after this version is running. Restart once to activate this update.
+The legacy `storage.provider_naive_timezone` setting is accepted but ignored.
+Existing correctly stored UTC caches and exchange timezone rules are unchanged.
+Timezone-naive provider results are rejected rather than assigned a guessed zone.
+
 ### Provider metadata
+
+Startup prints brief progress messages to stderr: HTTP address validation when
+applicable, cache backup, asset discovery, cached metadata loading, symbol metadata
+refresh, futures rollover refresh, history/calendar checks and repairs, registry
+saving, service preparation, and transport launch. Each phase runs across the
+known assets before the next phase begins.
+Messages describe logical stages rather than individual tickers. Stdout remains
+reserved for the MCP stdio protocol.
 
 Analysis, bars, and chart MCP responses include `provider_metadata`, for example:
 
@@ -120,6 +135,159 @@ Supported timeframes are `1h`, `4h`, `1D`, and `1W`. Each timeframe is fetched
 directly from tvDatafeed and stored independently as `1h.csv`, `4h.csv`,
 `1D.csv`, or `1W.csv`. Analysis and charts read the requested timeframe file;
 they do not construct higher-timeframe bars from `1h.csv`.
+
+### Futures rollover calendar
+
+Only `asset_bars` accepts `rollover: bool = false`; omitted requests return raw
+prices. Explicit `rollover=true` enables adjustment. On `1h` continuous front-month
+futures, the served OHLC view adds `previous raw close - rollover raw open` from
+a confirmed hourly rollover until the exclusive trading-week close. Volume is
+unchanged. `rollover=false` returns raw hourly prices. Native `4h`, `1D`, `1W`,
+and all price CSVs remain unchanged. Analysis and chart tools always use raw prices and expose no rollover parameters
+or adjustment metadata.
+Completion/receipt checks always run against raw prices before adjustment.
+
+`asset_bars` also accepts optional `rollover_start` (timezone-aware ISO timestamp,
+normalized to UTC) and `rollover_end` (Monday label, `YYYY-MM-DD`):
+
+| Bounds supplied | Effective interval |
+| --- | --- |
+| Neither | Each rollover's own trading week, preserving the between-week skip |
+| Start only | Exclude earlier switches; each included offset ends at its own week close |
+| End week only | From that trading week's opening through its close |
+| Both | From the exact start through the specified week's close |
+
+Start is inclusive and end exclusive. Only switches inside the interval count;
+prices before the first included switch remain raw. Explicit intervals include
+between-week switches, and offsets accumulate across weeks until the resolved end.
+An omitted end is resolved per event, never left open indefinitely. Bounds are
+ignored when `rollover=false`; other timeframes stay raw. Invalid date labels,
+naive start timestamps, reversed intervals, or an unavailable calendar for an
+explicit end return `INVALID_PARAMETER` rather than guessing.
+
+For example, `rollover=true, rollover_start="2026-09-18T19:00:00Z",
+rollover_end="2026-09-21"` includes Brent's September 24 switch and ends
+September 25 at 22:00 UTC. End week `2026-09-28` instead extends adjustment to
+October 2 at 22:00 UTC. Exchange timezone/DST rules determine both boundaries.
+
+The response's `rollover` object contains `enabled`, `applied`, `status`,
+`latest_bar_offset`, requested bounds, resolved UTC/local bounds, `end_basis`,
+and relevant `events`. Without a shared end, each event reports its own bounds.
+Applied events give contract pairs,
+week, `offset`, `applied_from_utc`, `applied_until_utc` (exclusive), local bounds,
+and source prices. Events in the supplied history can affect indicators even
+when the latest bar is outside the rollover week; `latest_bar_offset` then is 0.
+
+Independent raw price gaps are calculated once and saved atomically in
+`rollover_adjustments.json` (schema 2), without request-specific ends or cumulative
+offsets. Older records migrate using their saved `gap_offset`, preserving the
+original source-price provenance. Each request sums only included active gaps;
+changing episode bounds cannot inherit an excluded event's cumulative offset.
+Without explicit bounds a rollover at the week boundary is skipped.
+Daily-only rollover anchors, missing rollover/previous bars, unknown
+weeks, confirmed missing history at the switch, or revised switch timestamps
+remain raw with a reason in metadata. Ordinary session breaks are allowed: the
+formula removes the entire observed gap, including any intervening market move.
+The discontinuity returns after the adjustment interval ends. Missing/corrupt metadata
+or persistence failure leaves the view raw with an unavailable status.
+
+The existing `calendar.json` also stores `trading_weeks` for future hourly-only
+rollover adjustment. Schema 2 stores one recurring local opening/closing pair
+relative to a Monday week label, plus timezone and observation counts. Only 1h
+timestamps are used: no daily, 4h or weekly data dependency remains.
+
+The learner uses the configured calendar lookback, excludes both edge weeks,
+and selects the most frequent opening/closing pair with at least the configured
+minimum observations (default four). Tied patterns remain unavailable. A close
+is the final hourly opening plus one hour. For futures, weekend openings are
+grouped with the following Monday; `utc_calendar` assets use Monday–Sunday.
+This is an explicit week-label convention, not inferred holiday ownership.
+
+`hourly_trading_week` applies the local boundaries, including DST, to a supplied
+bar timestamp and returns its Monday label and UTC/local week bounds. It works
+for incoming/future bars without a daily refresh. The start is inclusive and
+the close exclusive. Outside the normal window, or without a supported rule,
+it returns no assignment. This is week membership, not a session-open check:
+daily breaks and holidays inside the window do not create new weeks.
+
+This compact rule replaces the earlier daily-dependent interval list. Unusual
+weekend sessions and historical schedule changes may lie outside the dominant
+pattern. Rules rebuild with the existing calendar lifecycle; old schemas
+rebuild on startup. Existing candle-close rules remain unchanged.
+
+Continuous front-month symbols (`1!`) also collect TradingView's separate
+`BarSetContinuousRollDates` study. The versioned study ID is discovered from
+the server; this is an internal TradingView interface, not a guaranteed API.
+Historical and published future events are stored in one `rollovers.json`
+beside the asset's existing CSVs, for example
+`data/ICEEUR/BRN1_-094a59d238/rollovers.json`. Ordinary assets, individual
+contracts and `2!` symbols are not queried by this collector.
+
+The file contains `schema_version: 2`, the source study ID, the source IANA
+`timezone`, successful `checked_at_utc`, `last_attempt_at_utc`, `last_result`
+(`events` or `empty`), and an ordered `events` list. Each event stores:
+
+```json
+{
+  "from": "ICEEUR:BRNZ2026",
+  "to": "ICEEUR:BRNF2027",
+  "trading_date": "2026-10-26",
+  "scheduled_at_utc": "2026-10-25T22:00:00+00:00",
+  "scheduled_at_local": "2026-10-25T22:00:00+00:00",
+  "timestamp_basis": "1h",
+  "first_seen_at_utc": "2026-09-24T08:21:24+00:00",
+  "last_seen_at_utc": "2026-09-24T08:21:24+00:00"
+}
+```
+
+UTC is authoritative; local time is also saved using the document's timezone,
+including DST. Local means source/exchange time, not the computer's timezone.
+The source trading-date label can differ from the calendar date of the
+scheduled bar. Source timezone is used even if the analysis profile uses another
+zone (COMEX reports New York, while the configured profile uses Chicago).
+`timestamp_basis` identifies an hourly (`1h`) or daily (`1D`) source bar anchor.
+Daily anchors provide advance calendar coverage, not confirmation of the exact
+first hourly switch bar; holiday/session mapping can place the anchor before the
+trading date. Hourly anchors take precedence when available. Only events with
+an hourly anchor can activate the adjustment described above.
+
+Collection runs once per known asset at each normal MCP startup
+(`refresh_on_start=True`), regardless of how recently its calendar was saved.
+Requests never refresh the source rollover schedule (`asset_bars` may
+save newly calculated offsets separately). There are no timed
+updates or retries during the running process; failed attempts wait until the
+next startup and preserve the saved calendar. Assets first requested after startup
+are collected on the next startup. Schedule revisions are picked up on restart.
+
+The study uses separate hourly and daily chart sessions; supporting OHLCV is
+discarded. All hourly events are retained, including historical negative indices
+and future indices outside the supporting series. The daily query adds the next
+three future events, with hourly timestamps taking precedence for matching pairs.
+Later startups replace daily anchors when hourly ones become available.
+`future_target: 3`, `future_available`, and `future_status` (`ready` or `limited`)
+describe coverage at the last successful check. `ready` means at least three
+published future events, not confirmed execution timestamps. The source controls
+coverage; absence of an event is **not** proof that no rollover will occur.
+September 24 validation retained all 51 previously identified 2025–2026 events
+and collected three future events for each of SI/MX/GC/BRN/NQ. This replaces the
+initial hourly-only query, which returned just one future Brent event.
+
+Events merge by old/new contract pair: a revised timestamp updates that pair,
+and events missing from a later response are retained with their older
+`last_seen_at_utc`. Only records seen at the latest successful check are part of
+that latest source snapshot. This compact file retains collection dates, not a
+full schedule revision archive. Empty completed responses are marked `empty`
+without erasing prior events; failed requests preserve the last successful
+calendar and add a sanitized `last_error`. On a first failure the file contains
+attempt/error metadata only. Writes are atomic and calendars are included in
+the existing startup backup. Corrupt/unwritable calendar files do not prevent
+price requests and produce a sanitized warning.
+
+Live provider/storage validation can be run from the repository root with
+`study/validate_rollover_collection.py --output <explicit-directory> --reference
+<historical-study-results.json> --minimum-future 3`. Its optional `--populate` writes only rollover
+metadata after comparison succeeds; it verifies existing price CSV hashes.
+Restart the MCP to activate automatic collection in the running process.
 
 ### Completion policy and frozen calendars (2026-09-09)
 

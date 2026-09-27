@@ -60,6 +60,22 @@ class CsvStorage:
             document = self._coverage_document(self.path_for(asset).parent / "coverage.json")
             return expand_coverage({k: v for k, v in document.items() if k != "receipt_evidence"})
 
+    def read_rollovers(self, asset):
+        with _WRITE_LOCK:
+            return read_json(self.path_for(asset).parent / "rollovers.json", {})
+
+    def read_rollover_adjustments(self, asset):
+        with _WRITE_LOCK:
+            return read_json(self.path_for(asset).parent / "rollover_adjustments.json", {})
+
+    def save_rollover_adjustments(self, asset, document):
+        with _WRITE_LOCK:
+            atomic_json(self.path_for(asset).parent / "rollover_adjustments.json", document)
+
+    def save_rollovers(self, asset, document):
+        with _WRITE_LOCK:
+            atomic_json(self.path_for(asset).parent / "rollovers.json", document)
+
     def save_coverage(self, asset, coverage):
         with _WRITE_LOCK:
             path = self.path_for(asset).parent / "coverage.json"

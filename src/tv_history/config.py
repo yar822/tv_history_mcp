@@ -14,7 +14,7 @@ DEFAULT_RUS_DAILY_TRADING_DATE_ASSETS = ("RUS:MX1!", "RUS:SI1!")
 class Settings:
     project_root: Path
     data_root: Path
-    provider_naive_timezone: str
+    provider_naive_timezone: str  # Legacy config compatibility; downloads decode UTC directly.
     initial_bars: int
     refresh_overlap_bars: int
     indicators: dict

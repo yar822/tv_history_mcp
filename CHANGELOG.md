@@ -3,6 +3,195 @@
 Meaningful changes to tv-history MCP, newest first. Entries describe implemented
 behavior; dates are work dates rather than published release versions.
 
+## 2026-09-24
+
+### Serve optional hourly rollover-week price adjustments
+
+- Latest scope change: only `asset_bars` supports rollover adjustment. Removed
+  adjustment parameters, processing and response metadata from analysis and chart
+  tools; they always consume raw prices. Renamed `rollover_end_week` to
+  `rollover_end` in bars inputs, response metadata and errors, preserving Monday
+  week-label / exclusive week-close semantics. This supersedes the all-tool
+  adjustment interface described below. Default remains `rollover=false`.
+  Updated README and the live-check script; restart MCP to activate the new schema.
+  Validation: all 345 automated tests passed, including bars-only schemas and raw
+  analysis/chart prices after a saved bars adjustment. The 31 adjustment tests
+  also passed after test cleanup. Live MCP validation remains pending.
+- Added optional `rollover_start` and `rollover_end_week` consistently to bars,
+  analysis and charts. No bounds preserve per-event weeks; start-only excludes
+  earlier switches with per-event closes; end-only selects that one trading week;
+  both select an exact start through the labelled week's timezone/DST-aware close.
+  Explicit intervals include between-week switches and accumulate active raw gaps.
+  Response metadata reports requested/resolved bounds, independent/cumulative
+  offsets and provenance. Invalid inputs or an unresolvable explicit end fail clearly.
+- Saved adjustment schema 2 freezes independent raw gaps instead of cumulative
+  offsets/end dates. Existing records migrate using their saved raw gap, so a
+  request excluding earlier events cannot inherit their offsets. `rollover=false`
+  remains default; CSVs and 4h/1D/1W prices stay raw. Restart MCP to load the new
+  parameters. No live MCP validation of episode parameters has been performed yet.
+- Episode validation: all 345 automated tests passed, including optional bounds,
+  exclusive ends, DST, between-week switches, legacy gap migration and all three
+  service/schema paths. Copied-cache checks covered all five assets and Brent
+  episode intervals; all 20 production CSV hashes remained unchanged. See the
+  [episode validation report](data/study/rollover_episode_20260924/report.json).
+
+- Read-only Friday audit of 66 saved events found Brent Friday rolls on
+  2025-07-25 and 2026-04-24; GC also has Friday trading-date labels (overnight
+  anchors). Cached Brent 2026-04-24 prices imply +5.66 offset: the next-week raw
+  opening gap is +1.02, or -4.64 when the prior week is adjusted. No prices or
+  behavior changed. See [Friday audit](data/study/friday_rollovers_20260924.json).
+
+- All three MCP tools now default to `rollover=false` (raw prices), replacing
+  the initial default-on behavior. Adjustment requires explicit `rollover=true`
+  in MCP requests and direct service calls. Tool instructions and README agree.
+  Confirmed midweek
+  `1h` continuous-futures rollovers add the previous raw close minus new open
+  through the exclusive learned week close. Bars, hourly analysis/indicators,
+  and chart prices use this view. Other timeframes, volume, CSVs and daily-derived
+  analysis context stay raw; `rollover=false` disables adjustment.
+- Completion and receipt checks run before adjustment. Response metadata reports
+  offsets and UTC/local application bounds. Offsets are frozen atomically in a
+  separate `rollover_adjustments.json`, survive restarts, and accumulate for
+  multiple switches within a week. Between-week rolls are skipped; missing or
+  unconfirmed evidence remains raw with an explicit status. The existing
+  startup-only source-calendar refresh is unchanged. Restart MCP to activate.
+- Local-price validation with copied metadata covered all five requested assets:
+  OHLC shifts agree, volume and other timeframes are unchanged, and all 20
+  production price CSV hashes are unchanged. See the
+  [validation report](data/study/rollover_adjustment_20260924/report.json).
+  After restart, live MCP schemas confirmed `rollover=true` on all three tools;
+  Brent bars, analysis and chart prices shifted by +5.25 with matching application
+  metadata. 4h/1D/1W on/off prices matched. Those requests triggered normal source
+  refreshes of the higher-timeframe CSVs; sampled hourly CSV values still matched
+  the raw response. See the [live report](data/live_checks/rollover_20260924/report.json)
+  and `study/check_rollover_live.py`.
+- Automated validation: all 327 tests passed. New checks cover the default tool
+  parameter, all three service paths, raw receipt-based finality, week reset,
+  disabled/other-timeframe behavior, frozen offsets across restart, multiple
+  switches, daily-only anchors, session breaks and confirmed missing history.
+  Diff whitespace checks passed.
+- Default-off follow-up: 57 targeted tool/service/adjustment tests passed,
+  including omitted-parameter raw results in all three services and false defaults
+  in all MCP schemas. No live MCP rerun for this follow-up; restart to activate.
+
+### Simplify hourly trading-week ownership
+
+- After the operator restart, live MCP initialization/tool listing succeeded.
+  All eight active saved calendars rebuilt at 11:00 UTC with ready schema-2
+  week rules and no legacy interval lists. This was a metadata/handshake check,
+  not a price-tool execution test; see the
+  [restart report](data/study/calendar_restart_20260924/report.json).
+
+- Replaced the earlier daily-dependent `trading_weeks` interval lists with one
+  recurring local opening/closing rule learned from hourly history (schema 2).
+  Fresh daily bars are no longer required. The most frequent repeated pair is
+  applied to incoming bars using the exchange timezone and DST; holidays and
+  daily breaks do not reset the week. Ties/insufficient history are unavailable,
+  and bars outside the normal window are unassigned. Futures weekend openings
+  belong to the following Monday-labelled week by explicit convention.
+- Calendar builds now include this metadata; startup rebuilds older calendars
+  using the older schema. The internal hourly lookup returns UTC/local bounds;
+  no prices, MCP responses, or rollover refresh timing changed.
+- Local-cache validation populated the five requested futures calendars, keeping
+  before-copies in the report folder. All 20 price CSV hashes were unchanged.
+  See [validation report](data/study/recurring_weeks_20260924/report.json) and
+  `study/validate_trading_weeks.py`. No live provider or end-to-end MCP validation
+  was performed. Exceptional sessions/schedule changes outside the learned
+  window remain unassigned; existing session-close learning is unchanged.
+- Validation: all 314 automated tests passed, including future/DST assignment,
+  exclusive close, holiday outliers, MOEX weekend boundaries, unavailable rules,
+  and metadata round-trip. Local cache checks assigned 29,835 of 29,870 hours;
+  35 outside the dominant windows remain unassigned. Latest Brent/MX rollover
+  bars now have week labels without fresh daily data. Diff checks passed.
+
+### Show startup progress by logical stage
+
+- Added brief, flushed stderr messages for HTTP address validation, cache backup,
+  asset discovery, metadata/rollover and history/calendar initialization, registry
+  saving, service preparation, and transport launch. Messages are emitted per
+  stage, not per ticker; stdout remains reserved for MCP protocol traffic.
+- Replaced the combined initialization message and interleaved per-asset work
+  with separate phases for cached metadata loading, symbol metadata refresh,
+  rollover collection, and history/calendar checks and repairs. Each message
+  appears immediately before its phase runs across the known assets.
+- Startup checks and rollover refresh timing are unchanged. Restart MCP to
+  see the messages. No live MCP or cache-copy validation was performed.
+- Automated validation: 63 server, rollover, synchronizer, and history-coverage tests passed,
+  including stderr-only startup progress with no per-ticker messages. Diff
+  whitespace checks passed.
+
+### Make history downloads independent of the PC timezone
+
+- Replaced tvDatafeed's host-local naive timestamp decoding and configured-zone
+  correction with a client-specific decoder that converts TradingView Unix
+  timestamps directly to timezone-aware UTC. DST fold timestamps retain their
+  distinct instants; unexpected naive results fail instead of silently shifting.
+- Removed `storage.provider_naive_timezone` from the project configuration;
+  legacy configurations still load, but that setting no longer affects downloads.
+  Restart MCP once to activate this code; subsequent PC timezone changes require
+  no configuration edits or restart. Existing UTC caches and market rules are
+  unchanged; this does not repair data previously downloaded with a wrong zone.
+- Regression coverage exercises the installed dependency's `get_hist` path with
+  mocked transport and simulated UTC/UTC+3/UTC-5 clocks, historical DST folds,
+  missing volume, empty replies and rejection of naive timestamps. The adapter
+  relies on tvDatafeed's private decoder hook, covered by the integration test.
+  Automated validation: all 309 tests passed; diff whitespace checks passed.
+- After the operator restarted MCP, live HTTP validation passed for BTCUSD,
+  MX1! and GC1! at 1h/4h: all 48 served timestamps matched independent provider
+  downloads, all 42 completed bars matched source OHLC, and 120 raw wire epochs
+  matched decoded UTC. All 18 captured-data replays under simulated UTC/UTC+3/
+  UTC-5 clocks were identical. The PC remained on UTC+3; its actual timezone was
+  not changed. Requests refreshed production caches normally; no cache-copy
+  validation or data repair was performed. See
+  [live report](data/live_checks/utc_timezone_20260924/report.json) and
+  `study/validate_utc_downloads.py` (explicit `--output` required).
+
+### Persist source-reported futures rollover calendars
+
+- Read-only week-boundary investigation: all 33 hourly rollover timestamps within
+  the current five asset caches had matching bars, but none of their saved
+  calendars contained a learned `1W` close rule. Raw weekly timestamps remain
+  candidate boundaries requiring trading-date/session validation. See the
+  [inspection report](data/study/rollover_weeks_20260924.json) and
+  `study/inspect_rollover_weeks.py`. No price adjustment or live fetch was performed.
+
+- Previously the MCP only collected basic symbol metadata and had no rollover
+  calendar. Continuous front-month (`1!`) assets now query TradingView's separate
+  roll-date study, discovering its version from server metadata, and atomically
+  save historical/published future events in one `rollovers.json` per asset.
+  UTC timestamps, explicit source-local timestamps with DST offsets, source
+  trading dates, IANA timezone, contract pairs and collection timestamps are
+  retained in schema 2; older files upgrade on their next startup.
+- The initial hourly-only query returned one future Brent event and none for
+  the other four assets. Separate hourly and daily queries now target at least
+  three future events. Hourly anchors take precedence; daily anchors are labelled
+  `timestamp_basis: 1D` and require hourly confirmation before adjustment.
+  Saved coverage counts/status expose source limitations without inventing dates.
+- Rollover collection now runs once per known asset at every MCP startup,
+  regardless of saved freshness. This replaces the earlier daily/hourly
+  request-driven refresh policy. Data/analysis/chart requests perform no rollover
+  updates; failures preserve successful data and wait for the next startup.
+  Empty/shortened replies retain old records with
+  their original last-seen timestamps. No background polling, offset calculation,
+  price adjustment, or MCP response-field changes were introduced.
+- Live provider/storage validation populated SI/MX/GC/BRN/NQ calendars and matched
+  all 51 independently identified 2025–2026 historical events, with three future
+  events per asset and valid local timestamps. All 20 production
+  price CSV hashes remained unchanged. See the
+  [validation report](../tv_app_test/rollover_three_future_20260924_verified/result.json)
+  and `study/validate_rollover_collection.py`. No cache-copy or end-to-end live MCP
+  validation was performed. Source history/future coverage is not guaranteed;
+  records are source-reported, not individually OHLC-verified by this feature.
+  Restart MCP to activate automatic collection.
+  The subsequent startup-only scheduling change was checked with automated tests;
+  the live provider collection was not repeated for that change.
+- Automated validation: all 300 tests passed, including the extended collector's
+  15 focused tests covering fragmented/heartbeat
+  protocol handling, version discovery, malformed/error replies, event merging,
+  startup/restart/concurrent-call deduplication, no refresh on historical requests, and unchanged
+  price storage, hourly precedence, and local timestamps across DST changes.
+  Documentation and diff whitespace checks also passed.
+
 ## 2026-09-17
 
 ### Omit internal metadata from MCP responses

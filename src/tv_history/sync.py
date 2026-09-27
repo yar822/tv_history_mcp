@@ -19,6 +19,10 @@ from .market_rules import resolve_market_rule
 from .coverage import audit_gaps, window_coverage
 from .calendar import slot, boundary_from_rule
 from .trading_dates import normalize_daily, normalize_weekly, uses_trading_dates
+from .rollovers import RolloverCalendars
+from .startup import startup_message
+from .trading_weeks import VERSION as TRADING_WEEKS_VERSION
+from .rollover_adjustment import RolloverAdjustments
 
 
 TIMEFRAME_DURATIONS = {
@@ -50,8 +54,12 @@ class HistorySynchronizer:
         self._last_fetch = {}
         self._successful_refresh_at = {}
         self._metadata_checked = set()
+        self.rollovers = RolloverCalendars(provider, storage)
+        self.rollover_adjustments = RolloverAdjustments(storage)
         if refresh_on_start:
+            startup_message("Backing up the existing cache...")
             self.backup_path = self._backup_cache()
+            startup_message("Loading the asset registry and configuration...")
         known = set((settings.timestamp_profiles or {}).keys())
         known.update(settings.rus_daily_trading_date_assets)
         known.update((settings.calendar_timezones or {}).keys())
@@ -62,18 +70,30 @@ class HistorySynchronizer:
         known.update(registry)
         if self.control_log.path.exists():
             known.update(pd.read_csv(self.control_log.path)["asset"].dropna())
-        for name in sorted({self._canonical(n) for n in known}):
-            asset = self._canonical(name)
-            folder = self.storage.path_for(asset).parent
+        known = sorted({self._canonical(n) for n in known})
+        if refresh_on_start:
+            startup_message(f"Loading cached metadata for {len(known)} assets...")
+        for asset in known:
             self.storage.migrate_metadata(asset)
             self.coverage[asset] = self.storage.read_coverage(asset)
-            if refresh_on_start:
+
+        if refresh_on_start:
+            startup_message("Refreshing symbol metadata...")
+            for asset in known:
                 self.get_provider_metadata(asset)
+            startup_message("Refreshing futures rollover calendars (target: 3 future dates)...")
+            for asset in known:
+                self.rollovers.refresh(asset, current_utc_time())
+            startup_message("Checking cached history and trading calendars; repairing history where needed...")
+
+        for asset in known:
+            folder = self.storage.path_for(asset).parent
             signature = self._cache_signature(asset)
             rules = self._check_settings(asset)
             previous = self.coverage[asset].get("startup_check", {})
             calendar = expand_calendar(read_json(folder / "calendar.json", {}))
             if (refresh_on_start and calendar and previous
+                    and calendar.get("trading_weeks", {}).get("schema_version") == TRADING_WEEKS_VERSION
                     and previous.get("files") == signature
                     and previous.get("settings") == rules
                     and previous.get("calendar_file") == self._file_signature(folder / "calendar.json")
@@ -95,7 +115,11 @@ class HistorySynchronizer:
                 self._check_startup(asset, frames, signature, rules)
             else:
                 self._audit(asset, frames)
+        if refresh_on_start:
+            startup_message("Saving the asset registry...")
         self._persist_registry()
+        if refresh_on_start:
+            startup_message("Cache and metadata initialization complete.")
 
     @staticmethod
     def _file_signature(path):

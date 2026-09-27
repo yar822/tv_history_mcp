@@ -13,6 +13,7 @@ from .resample import iso_utc
 from .sync import HistorySynchronizer
 from .windows import select_sessions, sessions_covered
 from .coverage import window_coverage
+from .rollover_adjustment import rollover_view, validate_rollover_parameters, RolloverParameterError
 
 
 MAX_COUNT = 1000
@@ -30,8 +31,12 @@ class AssetBarsService:
         timestamp: str | None,
         count: int = 100,
         sessions: int | None = None,
+        rollover: bool = False,
+        rollover_start: str | None = None,
+        rollover_end: str | None = None,
     ) -> dict:
         try:
+            validate_rollover_parameters(rollover, rollover_start, rollover_end)
             normalized_asset = normalize_asset(asset)
             requested_at = parse_timestamp(timestamp)
             duration = timeframe_duration(timeframe)
@@ -62,6 +67,8 @@ class AssetBarsService:
             context.setdefault("raw_opens", list(opened.index))
             completion_input.attrs = {"completion_context": context}
             details = completion_details(completion_input, duration, evaluated_at, delay)
+            bars, rollover_metadata = rollover_view(self.synchronizer, source, bars,
+                normalized_asset, timeframe, evaluated_at, rollover, rollover_start, rollover_end)
             bars = bars.copy(deep=False)
             bars.attrs = {}
             atr = None
@@ -73,6 +80,7 @@ class AssetBarsService:
                                        count=parsed_count if parsed_sessions is None else None, sessions=parsed_sessions)
             return {
                 "asset": normalized_asset,
+                "rollover": rollover_metadata,
                 "completion_calendar": calendar_metadata(source),
                 "timeframe": timeframe,
                 "requested_at": requested_at.isoformat(),
@@ -93,6 +101,8 @@ class AssetBarsService:
                     "scheduled_session_gaps": quality["scheduled_session_gaps"],
                 },
             }
+        except RolloverParameterError as exc:
+            return error_response("INVALID_PARAMETER", str(exc))
         except Exception as exc:
             code = "ASSET_NOT_FOUND" if "returned no data" in str(exc) else "DATA_PROVIDER_ERROR"
             return error_response(code, str(exc), retryable=is_transient_error(exc))

@@ -19,6 +19,7 @@ from .mcp_response import mcp_result
 from .provider import TvDatafeedProvider
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
+from .startup import startup_message
 
 
 settings = load_settings()
@@ -40,8 +41,14 @@ transport_security = TransportSecuritySettings(
 mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
-        "Analyze live or historical market bars, return raw bar series, or generate "
-        "candlestick charts. Live analysis and raw bar series may include the latest "
+        "Analyze live or historical market bars, return bar series, or generate "
+        "candlestick charts. Only asset_bars supports rollover adjustment, default OFF. Explicit rollover=true enables it: for 1h continuous futures, "
+        "add the previous close minus rollover open from the switch until that week's close. "
+        "Optional rollover_start selects switches from an exact UTC time; rollover_end "
+        "is a Monday YYYY-MM-DD label whose week close ends adjustment. With only rollover_end, "
+        "use that whole trading week. Explicit intervals include between-week switches. "
+        "Analysis and charts always use raw prices. CSV and 4h/1D/1W prices stay raw; rollover=false returns raw hourly prices. "
+        "Live analysis and bar series may include the latest "
         "non-final bar while derived analysis uses finalized bars only. "
         "Use EXCHANGE:SYMBOL (preferred) or the legacy "
         "SYMBOL:EXCHANGE format. Supported timeframes: 1h, 4h, 1D, and 1W."
@@ -68,6 +75,7 @@ async def asset_analysis(
         response_version: execution. May be omitted. Default: execution.
         include_indicators: Also include RSI, MACD, SMA200,
             EMA9/20/50, Bollinger Bands, ADX, and momentum change. Default: false.
+
 
     With an explicit timestamp, uses only bars whose close is at or before it.
     Without a timestamp, price_data may be the latest received non-final bar;
@@ -99,8 +107,11 @@ async def asset_bars(
     timestamp: str | None = None,
     count: int = 100,
     sessions: Annotated[int, Field(ge=1)] | None = None,
+    rollover: bool = False,
+    rollover_start: str | None = None,
+    rollover_end: str | None = None,
 ) -> CallToolResult:
-    """Return raw OHLCV bars, ordered oldest-first.
+    """Return OHLCV bars, ordered oldest-first.
 
     Inputs:
         asset: EXCHANGE:SYMBOL (preferred), for example ICEEUR:BRN1!. The legacy
@@ -110,6 +121,15 @@ async def asset_bars(
         count: Bars counting backward from timestamp, 1-1000. Default: 100.
         sessions: Return all bars from the last N distinct UTC trading dates.
             When supplied, sessions takes precedence over count.
+        rollover: Default false (raw prices). Explicit true smooths confirmed midweek 1h futures roll gaps
+            until that week's close; false returns raw hourly prices.
+            CSVs and 4h/1D/1W stay raw. Metadata gives offset and start/end.
+        rollover_start: Optional timezone-aware execution start; exclude earlier switches.
+        rollover_end: Optional Monday YYYY-MM-DD label; end at that week's close.
+            With only rollover_end, start at that week's opening. With no rollover_end,
+            each offset ends at its rollover week close. With neither bound, keep
+            default per-rollover weeks. Explicit intervals include between-week
+            switches. Bounds are ignored when rollover=false.
 
     Returns OHLCV bar objects with t/is_bar_complete/o/h/l/c/v, effective close,
     sessions and bars covered, ATR-14 on the returned series, and gap quality.
@@ -120,7 +140,8 @@ async def asset_bars(
     A new ticker initializes 1h/4h/1D/1W history before answering.
     """
     result = await asyncio.to_thread(
-        bars_service.get_bars, asset, timeframe, timestamp, count, sessions
+        bars_service.get_bars, asset, timeframe, timestamp, count, sessions, rollover,
+        rollover_start, rollover_end
     )
     await add_provider_metadata(result, asset)
     return mcp_result(result)
@@ -146,6 +167,7 @@ async def asset_chart(
         response_version: execution. May be omitted. Default: execution.
         sessions: Display the last N distinct UTC trading dates. When supplied,
             sessions takes precedence over days.
+
 
     Renders only bars confirmed complete by a later received bar or the configured
     asset-specific delay at a verified session/period end with fresh target data.
@@ -193,6 +215,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8010")))
     args = parser.parse_args()
     if args.transport == "streamable-http":
+        startup_message("Checking HTTP listen address availability...")
         try:
             check_listen_address(args.host, args.port)
         except OSError as exc:
@@ -200,10 +223,12 @@ def main() -> None:
                          "Stop the existing listener or choose another port. "
                          "No history refresh was started.")
     synchronizer = HistorySynchronizer(settings, provider, storage, refresh_on_start=True)
+    startup_message("Preparing analysis, bars, and chart services...")
     service = AssetAnalysisService(settings, synchronizer)
     bars_service = AssetBarsService(settings, synchronizer)
     chart_service = AssetChartService(settings, synchronizer, storage)
 
+    startup_message(f"Starting MCP transport ({args.transport})...")
     if args.transport == "stdio":
         mcp.run()
     else:
