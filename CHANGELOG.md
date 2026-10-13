@@ -3,6 +3,222 @@
 Meaningful changes to tv-history MCP, newest first. Entries describe implemented
 behavior; dates are work dates rather than published release versions.
 
+## 2026-10-07
+
+### Share observed historical week boundaries with completion
+
+- Ended historical weeks now share one hourly-history selection and coverage
+  check between dated `trading_session` and hourly completion, across assets.
+  This replaces recurring-only weekly-tail confirmation: Brent's October 27
+  week closes at its observed 22:00 UTC, while November 3 closes at 23:00 UTC,
+  without a Brent-specific rule or single-date override.
+- Week state uses the current clock and existing asset week ownership.
+  Ongoing/future weeks keep the learned schedule; cache edges, unknown coverage,
+  and confirmed missing data retain the learned fallback. Uncertain gaps preserve
+  observed history with uncertainty metadata. A cached successor and cutoff at
+  or after the observed hourly close remain required for the new
+  `historical_week_close_successor_confirmed` reason. Later OHLCV remains outside
+  the query window. Other timeframes retain existing completion rules.
+- Undated sessions remain recurring. Historical consumers must supply `date`;
+  observed cache boundaries do not guarantee complete exchange history.
+- Automated validation: all 420 tests passed, including cross-market boundaries,
+  ongoing/future weeks, missing evidence, pre-close cutoffs, and price/ATR isolation.
+  Existing-cache validation: 25 checks passed across six assets and two weeks;
+  hourly CSV hashes were unchanged. This was direct-cache evaluation, not a
+  cache-copy run. See [local validation](data/investigations/historical_week_completion_local_20261007.json).
+- Restarted the local HTTP MCP at `127.0.0.1:8010` through its normal startup
+  refresh, activating dated-session support previously present only on disk.
+  Post-restart validation passed all 80 combined local/live checks, including
+  27 live tool calls: dated sessions agree with completion for six assets over
+  both weeks, Brent remains incomplete one second before each close, and the
+  ongoing week remains expected. Both Brent weeks return 112/112 completed
+  bars at their observed closes. Hourly CSVs were unchanged during validation;
+  no manual data repair was performed. See [live evidence](data/investigations/historical_week_completion_live_20261007.json).
+- Stopped the validation MCP server afterward at the user's request; port 8010
+  has no listener. Start the server again when needed.
+- Rechecked the user's subsequently restarted MCP on port 8010: all 80 combined
+  checks passed again, including 27 live tool calls across six assets and both
+  historical weeks. Brent returns 112/112 complete at each observed close;
+  dated support, pre-close guards and ongoing-week fallback passed. Hourly CSV
+  hashes were unchanged during validation. Left the user's server running.
+  See [user-restart validation](data/investigations/historical_week_completion_user_restart_20261007.json).
+
+### Investigate Brent historical weekly completion
+
+- Expanded live checks to all 112 returned hourly bars in the October 27
+  trading week, including its Sunday opening. At October 31 22:00 and 23:00
+  UTC cutoffs, 111 are complete and only the 21:00 Friday bar is unconfirmed;
+  at November 3 01:00 UTC all 112 are complete. These are query-time flags,
+  not proof of complete exchange history. See [full-week flag evidence](data/investigations/brent_all_week_flags_20261007.json).
+- Live `trading_session` inspection found the running server advertises only
+  `asset` and `session`; supplying `date="2025-10-27"` is ignored and returns
+  the recurring Sunday/Friday 22:00 UTC schedule using the current +01:00
+  London offset. This differs from the dated implementation present on disk;
+  the live response is not historical session evidence. Three calls (October
+  27, November 3 and omitted date) and schema inspection reproduced this;
+  no restart or production change performed.
+  See [live session evidence](data/investigations/brent_dated_session_live_20261007.json).
+- Added `study/check_brent_week_completion.py` to inspect the 2025-10-27 week.
+  The saved recurring rule expects Friday 23:00 UTC; the cached final hourly
+  bar opens at 21:00 and ends at 22:00. The dated local session lookup returns
+  an observed 22:00 close with uncertain coverage, not proven complete history.
+- Local evaluation and three live MCP calls confirm successful tool responses
+  but an unconfirmed Friday tail at both 22:00 and 23:00 cutoffs. The same bar
+  becomes confirmed when the next cached opening is within the cutoff.
+  The exact recurring-close match prevents earlier weekly-close confirmation.
+  No production behavior or session rule changed; the cause of the schedule
+  discrepancy remains unverified. See [investigation evidence](data/investigations/brent_week_completion_20261007.json).
+
+## 2026-09-28
+
+### Add optional dated trading-session lookup
+
+- Simplified gap metadata to `uncertain_1h_gap_count`, replacing
+  `uncertain_gap_count` and removing the briefly added `gap_timeframe` and
+  `gap_count_unit` fields. Counts still measure intervals in hourly history,
+  not individual missing bars. Restart MCP to load this response change.
+  Validation: all 37 dated-session tests and diff whitespace checks passed;
+  no live MCP rerun for this rename/removal.
+- Corrected the all-gap historical fallback: unexplained gaps can be holidays
+  or normal closures and now preserve observed weekly bounds/daily hourly runs.
+  Metadata reports uncertain/confirmed missing-gap counts and uncertain coverage;
+  no holiday cause is asserted. Only gaps marked `incomplete` by saved coverage
+  trigger the missing-data fallback; cache edges, absent history and missing
+  coverage metadata retain their existing expectation fallback.
+- Validation for holiday-gap handling: 84 session/coverage tests passed,
+  including skipped opening, internal and closing sessions and mixed proven/
+  uncertain gaps. Repeated 48 dated local-service checks across six tickers;
+  sampled historical futures now retain observations with uncertain coverage.
+  Runtime hashes were unchanged. See [holiday-gap validation](data/study/dated_sessions_holiday_gaps_20260928/report.json).
+  Diff whitespace checks passed. No live MCP rerun; restart to load this change.
+- Implemented optional `date="YYYY-MM-DD"` for `trading_session` in weekly and
+  daily modes. All input weekdays normalize backward to Monday, including
+  Sunday; actual cached bars retain their existing trading-week ownership.
+  Dated windows add UTC/local ISO datetimes and observed/expected basis. Omitted
+  or null dates preserve the existing recurring response.
+- Ended weeks use observed hourly boundaries only with bracketing cached groups
+  and no relevant unresolved saved coverage. Incomplete, absent or unreadable
+  history now returns expectations from saved rules, superseding the proposed
+  partial/unavailable historical behavior. Metadata reports `history_fallback`,
+  `expectation_reason`, cache coverage and week state. Missing expectation rules
+  still return unavailable. Ongoing/future weeks always use expectations.
+- Expected dates apply each boundary's own DST offset rather than today's;
+  ambiguous/nonexistent local boundaries remain unavailable. Daily expectations
+  retain partial template coverage; no holidays or missing weekdays are invented.
+  The tool performs no downloads or runtime writes. Restart MCP to activate the
+  optional argument; live validation of dated calls remains pending.
+- Validation: all 401 automated tests passed; an additional focused rerun of
+  the MCP adapter test passed after adding dated-argument forwarding assertions.
+  Read-only local validation exercised 48 dated calls plus omitted/null parity
+  across six assets; runtime hashes were unchanged. Sampled futures histories
+  fell back due to unresolved saved coverage, while BTC historical weeks were
+  observed. See [dated validation](data/study/dated_trading_session_20260928/report.json)
+  and `study/validate_dated_trading_session.py`. This was direct service/cache
+  validation, not live MCP validation. Diff whitespace checks passed.
+
+- Simplified proposed date selection: every input date normalizes backward to
+  its calendar-week Monday, including Sunday, for every asset. Actual session
+  boundaries and cached-bar ownership still follow the asset's trading schedule.
+  Replaces the earlier next-Monday weekend input rule; documentation only.
+- Added the [optional-date plan](study/dated_trading_session_plan.md): preserve
+  undated output, resolve a local date to its trading week, use hourly-cache
+  observations for ended weeks and dated expectations for ongoing/future weeks.
+  Specify cache-edge/coverage limitations, daily mode, date-specific DST and
+  holiday uncertainty. Proposal only; no tool behavior changed. Reviewed current
+  grouping, storage and coverage code; no live run for this documentation edit.
+
+### Confirm historical hourly weekly closes from cached successors
+
+- Added a narrow completion fallback for a `1h` bar whose end matches the
+  recurring weekly close: when the cutoff reaches that close and a later raw
+  bar is cached, return `weekly_close_successor_confirmed`. Unlike the earlier
+  cutoff-only successor check, this fallback can use evidence beyond the cutoff
+  and a weekly schedule built later. Returned prices and indicators stay bounded
+  by the cutoff; other bars, timeframes and existing completion paths are unchanged.
+- Automated validation: 64 calendar-finality, bars and trading-week tests passed,
+  including intrabar cutoffs, absent evidence, other timeframes, winter offsets
+  and exclusion of successor prices from bars/ATR. Four local evaluator checks
+  against cached Gold passed; no runtime cache edits or cache-copy checks were
+  performed. See [cached-data evidence](data/investigations/gold_weekly_close_fixed_20260928.json)
+  and `study/validate_gold_weekly_close.py`. Diff whitespace checks passed.
+- After the operator restart, live HTTP MCP validation passed 25 checks across
+  five Gold queries: Friday 21:00/21:15 now confirm the weekly closing bar;
+  20:30 remains incomplete, an ordinary 19:30 cutoff retains its prior behavior,
+  and the later Monday query retains `successor_received`. OHLCV matches the
+  original evidence and Friday responses exclude later prices. See the
+  [live report](data/live_checks/gold_weekly_close_20260928/report.json) and
+  `study/check_gold_weekly_close_live.py`. Unknown/exceptional weekly closes
+  retain the prior rules.
+
+### Investigate Gold historical closing-bar confirmation
+
+- Live HTTP MCP queries reproduced `COMEX:GC1!` September 18 20:00 UTC
+  remaining incomplete (`awaiting_successor`, no completion boundary) at both
+  21:00 and 21:15 UTC. A September 21 01:00 cutoff marks the same bar complete
+  via `successor_received`, with identical OHLCV. The current calendar is
+  effective September 27 and cannot authorize the earlier boundary exception.
+- Added `study/check_gold_closing_confirmation.py` and saved the three live
+  responses in the [investigation evidence](data/investigations/gold_closing_confirmation_20260928.json).
+  No production code or configuration changed in this investigation. Original
+  runner completion/workaround behavior was not independently audited.
+
+### Add recurring trading_session MCP tool
+
+- Added `metadata.utc_offset_collected_at_utc` alongside the existing
+  `utc_offset_applied` in weekly and daily schedule responses. The timestamp is
+  the exact request-time UTC instant used to calculate the exchange offset,
+  distinct from calendar build/training dates. All 15 session tests passed,
+  including both sides of Chicago's winter-time transition; diff whitespace
+  checks passed. Restart MCP to activate this addition; live validation of the
+  new timestamp field remains pending.
+- After the operator restart, live HTTP MCP validation passed all 73 checks
+  across 12 calls (weekly/default and daily for SI, MX, GC, Brent, NQ and BTC).
+  Confirmed the two-parameter schema, saved weekly boundaries, UTC/local
+  equivalence, construction metadata, holiday notes and daily template counts.
+  Five daily responses are partial; BTC daily is unavailable because no daily
+  breaks were learned. Selected runtime files and download log hashes were
+  unchanged. See the [live report](data/live_checks/trading_session_20260928/report.json)
+  and `study/check_trading_session_live.py`.
+- Implemented `trading_session(asset, session="week")` with `week`/`daily` modes
+  and no date input. Reads saved calendars only and returns UTC weekday/time
+  windows, exchange-local equivalents, construction evidence, and explicit
+  holiday uncertainty. Weekly ends remain exclusive (last hourly open plus one
+  hour). Restart MCP to expose the fourth tool.
+- UTC conversion uses the current exchange offset; responses note that callers
+  must request again after DST changes. Daily templates remain partial without
+  filling missing weekdays. BTC's weekly rule works independently of its absent
+  daily sessions; missing/unsupported/corrupt calendars return unavailable with
+  a reason. No provider metadata fetch, initialization, or runtime writes occur.
+- Automated validation: full-suite run passed 356 tests and found one outdated
+  three-tool count assertion. Updated it for four tools; that regression and all
+  13 new session tests passed in a focused rerun (14 total), including an added
+  Moscow weekday-conversion case. No full-suite rerun after that test-only fix.
+  Diff whitespace checks passed.
+- Direct read-only service validation covered both modes for all nine saved
+  tickers (18 calls); calendar hashes were unchanged. See the
+  [validation report](data/study/trading_session_20260928/report.json) and
+  `study/validate_trading_session.py`. This was local service/cache validation,
+  not a live MCP transport check. README and the agreed plan now document the
+  implemented interface and limitations.
+
+### Inspect available hourly week boundaries and propose a read-only tool
+
+- Updated [the tool plan](study/week_tool_plan.md) to propose
+  `trading_session(asset, session="week")`, with `week`/`daily` modes and no date
+  input. Recurring weekday/time windows use UTC with exchange-local information,
+  construction metadata, and explicit holiday uncertainty. This replaces the
+  earlier optional-week-date proposal; MCP behavior is unchanged.
+- Defined current-exchange-offset UTC conversion and its DST limitation. Daily
+  mode exposes saved templates as partial, without inventing missing weekdays.
+  Added weekly/daily examples. Documentation-only revision; no live MCP rerun.
+- Read-only local inspection of nine saved calendars and hourly CSVs found eight
+  ready week rules and VIX unavailable without a timezone. Recorded weak MOEX
+  agreement, older cache evidence, and incomplete daily session templates in the
+  [evidence report](data/study/week_tool_20260928/report.json). No live MCP or
+  provider validation was performed; runtime data and calendars were unchanged.
+- Validation: all five existing trading-week automated tests passed; diff
+  whitespace checks passed. The proposed tool itself is not implemented or tested.
+
 ## 2026-09-24
 
 ### Serve optional hourly rollover-week price adjustments

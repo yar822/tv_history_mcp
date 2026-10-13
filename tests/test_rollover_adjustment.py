@@ -153,7 +153,8 @@ def test_only_bars_exposes_rollover_with_renamed_end():
     import asyncio
     from tv_history.server import mcp
     tools = asyncio.run(mcp.list_tools())
-    assert len(tools) == 3
+    assert {tool.name for tool in tools} == {
+        "asset_analysis", "asset_bars", "asset_chart", "trading_session"}
     for tool in tools:
         properties = tool.inputSchema["properties"]
         assert "rollover_end_week" not in properties

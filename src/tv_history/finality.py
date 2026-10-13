@@ -5,6 +5,8 @@ import pandas as pd
 from .config import Settings
 from .provider import split_asset
 from .calendar import expected_boundary
+from .trading_weeks import VERSION, _monday, hourly_trading_week, trading_week_bounds
+from .historical_weeks import observed_history
 
 
 def finalization_delay(settings: Settings, asset: str) -> pd.Timedelta:
@@ -27,12 +29,14 @@ def finality_flags(
 def completion_details(opened, duration, evaluated_at, delay):
     context = opened.attrs.get("completion_context", {})
     raw_opens = pd.DatetimeIndex(pd.to_datetime(context.get("raw_opens", list(opened.index)), utc=True, format="mixed"))
-    raw_opens = raw_opens[raw_opens <= evaluated_at].sort_values()
+    all_raw_opens = raw_opens.sort_values()
+    raw_opens = all_raw_opens[all_raw_opens <= evaluated_at]
     calendar = context.get("calendar")
     receipts = context.get("receipts", {})
     tf = context.get("timeframe", {pd.Timedelta(hours=1): "1h", pd.Timedelta(hours=4): "4h",
                                   pd.Timedelta(days=1): "1D", pd.Timedelta(days=7): "1W"}.get(duration))
     records = []
+    now = current_utc_time()
     # pandas propagates/deep-copies attrs into each Series produced by iterrows.
     # Receipt maps and raw timestamp lists belong to the evaluation, not each row.
     rows = opened.copy(deep=False)
@@ -61,6 +65,29 @@ def completion_details(opened, duration, evaluated_at, delay):
                     reason = "period_boundary_delay" if tf in {"1D", "1W"} else "session_boundary_delay"
                 else:
                     reason = "awaiting_fresh_data"
+        # Historical weekly tails may use a later cached successor as evidence,
+        # without admitting its prices into the requested window. The recurring
+        # week rule may be newer than the cutoff; it alone never confirms a bar.
+        if (not flag and tf == "1h" and raw + pd.Timedelta(hours=1) <= evaluated_at
+                and all_raw_opens.searchsorted(raw, side="right") < len(all_raw_opens)):
+            week = hourly_trading_week(calendar or {}, raw)
+            close = pd.Timestamp(week["end_utc"]) if week else None
+            rule = (calendar or {}).get("trading_weeks", {})
+            observed = None
+            if (rule.get("schema_version") == VERSION and rule.get("timezone")
+                    and type(rule.get("weekend_belongs_to_next_week")) is bool):
+                monday = _monday(raw.tz_convert(rule["timezone"]), rule["weekend_belongs_to_next_week"])
+                observed, _, _ = observed_history(
+                    all_raw_opens, context.get("hourly_coverage", {}), monday,
+                    rule["timezone"], rule["weekend_belongs_to_next_week"], now,
+                    trading_week_bounds(calendar, monday))
+                if observed is not None:
+                    close = observed[-1] + pd.Timedelta(hours=1)
+            if close is not None and raw + pd.Timedelta(hours=1) == close:
+                flag = True
+                reason = ("historical_week_close_successor_confirmed" if observed is not None
+                          else "weekly_close_successor_confirmed")
+                boundary = close
         records.append({"is_bar_complete": flag, "completion_reason": reason,
                         "completion_boundary": boundary.isoformat() if boundary is not None else None})
     return pd.DataFrame(records, index=opened.index,
@@ -76,3 +103,7 @@ def calendar_metadata(source):
         tf: sum(key.startswith(tf + "|") and key not in calendar.get("suspended_rules", {})
                 for key in calendar.get("rules", {})) for tf in ("1h", "4h", "1D", "1W")}
     return result
+
+
+def current_utc_time():
+    return pd.Timestamp.now(tz="UTC")

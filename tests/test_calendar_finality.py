@@ -107,6 +107,37 @@ def test_normalized_daily_label_does_not_change_physical_boundary(tmp_path):
     assert not evaluate(f, "1D", "2026-09-01T08:00Z").is_bar_complete
 
 
+@pytest.mark.parametrize("tf,opened,cutoff,successor,weekly_rule,complete", [
+    ("1h", "2026-09-18T20:00Z", "2026-09-18T21:00Z", True, True, True),
+    ("1h", "2026-09-18T20:00Z", "2026-09-18T21:15Z", True, True, True),
+    ("1h", "2026-09-18T20:00Z", "2026-09-18T20:30Z", True, True, False),
+    ("1h", "2026-09-18T20:00Z", "2026-09-18T21:00Z", False, True, False),
+    ("1h", "2026-09-18T20:00Z", "2026-09-18T21:00Z", True, False, False),
+    ("1h", "2026-09-18T19:00Z", "2026-09-18T21:00Z", True, True, False),
+    ("4h", "2026-09-18T17:00Z", "2026-09-18T21:00Z", True, True, False),
+    ("1D", "2026-09-17T22:00Z", "2026-09-18T21:00Z", True, True, False),
+    ("1W", "2026-09-13T22:00Z", "2026-09-18T21:00Z", True, True, False),
+    ("1h", "2026-11-20T21:00Z", "2026-11-20T22:00Z", True, True, True),
+])
+def test_weekly_close_uses_later_cached_successor(tf, opened, cutoff, successor, weekly_rule, complete):
+    cal = {"status": "ready", "effective_from": "2026-12-01T00:00Z"}
+    if weekly_rule:
+        cal["trading_weeks"] = {
+            "schema_version": 2, "status": "ready", "timezone": "America/Chicago",
+            "weekend_belongs_to_next_week": True,
+            "open": {"day_offset": -1, "time": "17:00"},
+            "close": {"day_offset": 4, "time": "16:00"},
+        }
+    f = with_evidence(cal, tf, opened)
+    if successor:
+        f.attrs["completion_context"]["raw_opens"].append(
+            (pd.Timestamp(cutoff) + pd.Timedelta(days=3)).isoformat())
+    result = evaluate(f, tf, cutoff)
+    assert bool(result.is_bar_complete) is complete
+    assert result.completion_reason == ("weekly_close_successor_confirmed" if complete else "awaiting_successor")
+    assert result.completion_boundary == ((pd.Timestamp(opened) + pd.Timedelta(hours=1)).isoformat() if complete else None)
+
+
 def test_calendar_has_separate_weekends_and_no_historical_lookahead(tmp_path):
     cal = learn_calendar(ASSET, native_frames(True), configured(tmp_path), pd.Timestamp("2026-09-01T00:00Z"))
     assert cal["session_templates"]["5"] != cal["session_templates"]["1"]

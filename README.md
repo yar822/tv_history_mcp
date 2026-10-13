@@ -136,6 +136,97 @@ directly from tvDatafeed and stored independently as `1h.csv`, `4h.csv`,
 `1D.csv`, or `1W.csv`. Analysis and charts read the requested timeframe file;
 they do not construct higher-timeframe bars from `1h.csv`.
 
+### Recurring trading sessions
+
+`trading_session(asset, session="week", date=None)` reads the saved calendar and returns
+recurring weekday/time windows learned from hourly history. `asset` accepts
+`EXCHANGE:SYMBOL` or the legacy `SYMBOL:EXCHANGE` format. Omit `date` to keep the
+recurring weekday/time response described below.
+
+```python
+trading_session(asset="CME_MINI:NQ1!")
+trading_session(asset="CME_MINI:NQ1!", session="daily")
+trading_session(asset="CME_MINI:NQ1!", date="2025-09-28")
+```
+
+The default `week` mode returns one weekly opening/closing pair. `daily` returns
+available daily templates, preserving overnight sessions and separate runs
+around breaks. Each entry in `sessions` contains `open` and `close` objects with
+`day` and UTC `time` (for example Sunday `22:00:00Z` to Friday `21:00:00Z` for NQ
+at Chicago offset -05:00), plus a `local` opening/closing pair and the response's
+`local_timezone`. Weekdays come from each ticker's rule. Equal weekly endpoints
+mean a full seven-day window, as with BTC Monday-to-Monday.
+
+UTC conversion uses the exchange's **current offset**, recorded in metadata as
+`utc_offset_applied` (for example `-05:00`). `utc_offset_collected_at_utc` records
+the UTC date/time when that offset was calculated for this response, using the
+same instant as the conversion. It is separate from the saved calendar's build
+and training dates. Request again after a daylight-saving offset change. This is not a dated or
+all-year UTC timetable. Opening is inclusive; closing is exclusive, inferred
+as the last hourly opening plus one hour. Holidays and exceptional closures are
+unknown, and weekly windows can contain daily breaks.
+
+Metadata reports construction method, saved build/training times and available
+evidence counts. Weekly results use `status="recurring_rule"`; daily templates
+use `status="partial"` and `coverage="observed_templates_only"` because missing
+weekdays are unknown, not confirmed closures. Daily per-pattern agreement counts
+are not stored and are not invented. BTC can have a ready weekly rule but no
+learned daily sessions. Missing/unusable evidence returns `status="unavailable"`,
+a reason, and an empty `sessions` list.
+
+This tool performs no downloads, ticker initialization, retraining or cache
+writes. Initialize a new ticker through an existing price tool first. Restart
+the MCP server after upgrading to expose the new tool/parameters.
+
+#### Optional dated week
+
+`date` accepts a strict `YYYY-MM-DD` and always normalizes backward to Monday,
+including on Sunday, for every ticker. For example `2025-09-28` selects the week
+labelled `2025-09-22`. Actual bars retain their existing asset-specific week
+ownership: NQ's selected week can open on Sunday September 21. The response
+echoes `requested_date` and `week`. Daily mode returns windows within that same
+selected week, not only the requested day.
+
+Dated `sessions` retain their weekday/time fields and add `datetime` to every
+UTC/local opening and closing, plus `basis="observed"` or `"expected"` per window.
+Ended weeks use observed hourly boundaries only when cached groups bracket the
+selected week and saved coverage contains no overlapping **confirmed missing-data**
+gaps (`status="incomplete"`). A gap classified `uncertain` does not trigger a
+fallback: it could be a holiday or normal closure. Such weeks retain observed
+boundaries with `metadata.coverage="uncertain"`, `uncertain_1h_gap_count` and
+`confirmed_missing_gap_count`. These counts represent gap intervals in hourly
+history, not individual missing bars. The existing hourly coverage checker flags
+confirmed missing data when other cached bars demonstrate trading inside the
+hole (for example a complete 4h interval inside a gap in 1h history).
+Historical observations are not clipped to the current recurring pattern.
+Daily observations split contiguous hourly runs at physical gaps, preserving
+overnight, shortened and skipped sessions. Unexplained gaps remain unknown;
+these runs are not claimed to be verified exchange sessions or named holidays.
+Closing remains the last hourly opening plus one
+hour, not an independently verified exchange closing timestamp.
+
+Weeks are classified against the current clock and the asset's week-ownership
+convention, not the historical query cutoff. The current owning week continues
+to use the learned schedule even after its expected Friday close.
+
+Ongoing/future weeks return `status="expected"`. Incomplete, missing, unreadable
+or unverified historical coverage also returns expected boundaries when a saved
+rule exists, with `metadata.history_fallback=true` and `expectation_reason` such
+as `incomplete_history`, `history_unavailable` or `coverage_unknown`. Historical
+expectations are never labelled observed. Metadata distinguishes `week_state`,
+cache coverage and available evidence. Expected daily templates retain partial
+coverage via `template_coverage="observed_templates_only"`; unknown weekdays
+are not filled in. Without a usable rule, expectations remain unavailable.
+
+Dated conversions use each boundary's historical/future timezone offset, not
+today's offset. Local ISO timestamps expose those offsets; metadata reports
+`utc_basis="boundary_dates"` and `evaluated_at_utc`. The single
+`utc_offset_applied`/`utc_offset_collected_at_utc` pair belongs to undated
+responses only. Ambiguous/nonexistent expected DST boundary times return an
+unavailable reason. No holiday calendar is available; observed history can
+reflect holidays, while expected boundaries cannot account for them. All dated
+lookups are read-only and perform no history refresh.
+
 ### Futures rollover calendar
 
 Only `asset_bars` accepts `rollover: bool = false`; omitted requests return raw
@@ -469,7 +560,21 @@ physical boundary used by a timeout. Strict consumers asserting exact JSON key
 sets must allow the additions. Bars, explicit/live analysis, and charts use the
 same completion evaluator; downstream daily indicators receive finalized data.
 
-A historical cutoff limits eligible source bars and successors. A calendar built
+A historical cutoff limits eligible source bars and ordinary successor evidence.
+For the final `1h` bar of an ended historical week, completion uses the same
+observed boundaries and coverage safeguards as dated `trading_session`. A later
+cached successor can confirm that bar once the requested cutoff reaches its
+observed close, returning `historical_week_close_successor_confirmed` and that
+close as `completion_boundary`. This applies to all assets with supported week
+ownership, including continuous markets, without ticker-specific DST overrides.
+Ongoing/future weeks and insufficient historical evidence retain the learned
+weekly boundary fallback (`weekly_close_successor_confirmed`), still requiring
+a matching hourly end, a cutoff at or after it, and a cached successor.
+The schedule or observations may be newer than the cutoff. Later prices remain
+excluded from returned bars and indicators; completion reconstructs history.
+Unknown weekly boundaries and other bars retain existing rules. Undated
+`trading_session` remains recurring; historical callers must pass `date`.
+A calendar built
 today cannot authorize a boundary exception before its effective time. Historical
 OHLCV remains reconstructed, potentially revised history, not an immutable record
 of what was received live. Live download responses can arrive after their request

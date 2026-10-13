@@ -56,6 +56,32 @@ def test_selected_bar_retains_boundary_and_receipt_evidence(tmp_path, fetched, c
     assert pd.Timestamp(result["bars"][0]["completion_boundary"]) == pd.Timestamp("2026-09-01T16:00Z")
 
 
+def test_weekly_close_confirmation_keeps_price_window_and_atr(tmp_path):
+    from tv_history.indicators import calculate_indicators
+    source = pd.DataFrame(
+        {"open": 100., "high": 101., "low": 99., "close": 100., "volume": 100.},
+        index=pd.date_range("2026-09-18T00:00Z", periods=21, freq="1h"))
+    cfg = settings(tmp_path)
+    expected_atr = round(float(calculate_indicators(source, cfg.indicators).iloc[-1]["ATR"]), 2)
+    source.loc[pd.Timestamp("2026-09-20T22:00Z")] = [900., 1000., 800., 950., 9999.]
+    source.attrs["completion_context"] = {
+        "timeframe": "1h", "raw_opens": list(source.index),
+        "calendar": {"status": "ready", "effective_from": "2026-09-27T00:00Z",
+                     "trading_weeks": {
+                         "schema_version": 2, "status": "ready", "timezone": "America/Chicago",
+                         "weekend_belongs_to_next_week": True,
+                         "open": {"day_offset": -1, "time": "17:00"},
+                         "close": {"day_offset": 4, "time": "16:00"}}}}
+    result = AssetBarsService(cfg, FakeSynchronizer(source)).get_bars(
+        "COMEX:GC1!", "1h", "2026-09-18T21:00Z", count=100)
+    assert result["bars_returned"] == 21
+    assert result["bars"][-1]["t"] == "2026-09-18T20:00:00Z"
+    assert result["bars"][-1]["completion_reason"] == "weekly_close_successor_confirmed"
+    assert result["bars"][-1]["is_bar_complete"] is True
+    assert all(b["c"] == 100. for b in result["bars"])
+    assert result["atr_14"] == expected_atr
+
+
 def session_frame() -> pd.DataFrame:
     timestamps = []
     for day in (17, 18, 19, 20):

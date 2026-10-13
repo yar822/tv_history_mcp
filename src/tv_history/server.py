@@ -20,6 +20,7 @@ from .provider import TvDatafeedProvider
 from .storage import CsvStorage
 from .sync import HistorySynchronizer
 from .startup import startup_message
+from .trading_session import TradingSessionService
 
 
 settings = load_settings()
@@ -42,7 +43,10 @@ mcp = FastMCP(
     name="TradingView Historical Asset Analysis",
     instructions=(
         "Analyze live or historical market bars, return bar series, or generate "
-        "candlestick charts. Only asset_bars supports rollover adjustment, default OFF. Explicit rollover=true enables it: for 1h continuous futures, "
+        "candlestick charts. trading_session returns recurring session times or, with date, "
+        "observed historical weekly/daily boundaries; ongoing weeks use learned schedules. "
+        "Times are in UTC and exchange-local time; holidays are unknown. "
+        "Only asset_bars supports rollover adjustment, default OFF. Explicit rollover=true enables it: for 1h continuous futures, "
         "add the previous close minus rollover open from the switch until that week's close. "
         "Optional rollover_start selects switches from an exact UTC time; rollover_end "
         "is a Monday YYYY-MM-DD label whose week close ends adjustment. With only rollover_end, "
@@ -55,6 +59,33 @@ mcp = FastMCP(
     ),
     transport_security=transport_security,
 )
+
+
+@mcp.tool()
+async def trading_session(
+    asset: str,
+    session: Literal["week", "daily"] = "week",
+    date: str | None = None,
+) -> CallToolResult:
+    """Return recurring or dated observed session windows from cached hourly history.
+
+    asset: EXCHANGE:SYMBOL (preferred), or legacy SYMBOL:EXCHANGE.
+    session: week (default) returns the weekly opening/closing window; daily
+        returns daily windows for the selected week. Expected templates have
+        partial coverage; missing days are unknown.
+    date: Optional YYYY-MM-DD, normalized backward to its calendar-week Monday
+        even on Sunday. Returns dated observed boundaries for supported history;
+        ongoing/future weeks or incomplete history use expectations with metadata.
+
+    UTC is primary with exchange-local times alongside. Undated conversion uses
+    the current exchange offset; request again after a daylight-saving offset change.
+    Opening is inclusive; closing is exclusive (last hourly open plus one hour).
+    Holidays and exceptional closures are unknown. Weekly windows contain breaks.
+    Dated boundaries use their own date's timezone offset. Without date, the
+    recurring response is unchanged. Reads local caches only; no downloads or initialization.
+    """
+    result = await asyncio.to_thread(TradingSessionService(storage).get_sessions, asset, session, date)
+    return mcp_result(result)
 
 
 @mcp.tool()
@@ -137,6 +168,9 @@ async def asset_bars(
     bar may be incomplete; is_bar_complete applies source confirmation plus the
     asset-specific delay at a verified session/period end with fresh target data.
     Responses add completion_reason, completion_boundary and completion_calendar.
+    Historical weekly hourly tails share the observed boundary used by dated
+    trading_session; confirmation still requires a later cached successor and
+    a cutoff at or after that close. Ongoing weeks use the learned schedule.
     A new ticker initializes 1h/4h/1D/1W history before answering.
     """
     result = await asyncio.to_thread(

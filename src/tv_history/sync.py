@@ -462,6 +462,10 @@ class HistorySynchronizer:
             "timeframe": timeframe, "calendar": deepcopy(self.calendars.get(asset)),
             "raw_opens": [t.isoformat() for t in source.index],
             "receipts": source.attrs.get("receipts", {}),
+            "hourly_coverage": {
+                key: deepcopy(value) for key, value in self.coverage.get(asset, {}).get("1h", {}).items()
+                if timeframe == "1h" and key == "unresolved_gaps"
+            },
         }
         view.attrs["history_coverage"] = deepcopy(self.coverage.get(asset, {}).get(timeframe, {}))
         return view
